@@ -71,7 +71,9 @@ class LlamaClient:
             if stream:
                 return response
             else:
-                return {
+                # Create a dictionary with the response data
+                # Handle the case where response may not have an id attribute
+                response_dict = {
                     "choices": [
                         {
                             "message": {
@@ -82,9 +84,14 @@ class LlamaClient:
                             "finish_reason": "stop"
                         }
                     ],
-                    "model": model,
-                    "id": response.id
+                    "model": model
                 }
+                
+                # Add id if it exists
+                if hasattr(response, 'id'):
+                    response_dict["id"] = response.id
+                    
+                return response_dict
         
         except Exception as e:
             logger.error(f"Error calling LLaMA API: {str(e)}")

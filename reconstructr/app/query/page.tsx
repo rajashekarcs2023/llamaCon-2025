@@ -10,7 +10,7 @@ import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
 import { MessageSquare, Send, Volume2, VolumeX, Loader2 } from "lucide-react"
 import type { Query } from "@/types"
-import { submitQuery } from "@/lib/api-service"
+import { queryAnalysis } from "@/lib/api-service"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 
@@ -29,9 +29,29 @@ export default function QueryPanelPage() {
     setLoading(true)
 
     try {
-      const query = await submitQuery(inputValue)
-      setQueries((prev) => [...prev, query])
-      setInputValue("")
+      // Use a mock analysis ID for now
+      const analysisId = "analysis-123";
+      const queryText = inputValue;
+      
+      // Call queryAnalysis with the analysis ID and query text
+      const response = await queryAnalysis(analysisId, { text: queryText });
+      
+      // Create a query object to match the expected structure
+      const query: Query = {
+        id: `query-${Date.now()}`,
+        text: queryText,
+        timestamp: new Date().toISOString(),
+        response: {
+          text: response,
+          visualData: {
+            type: "text",
+            content: response
+          }
+        }
+      };
+      
+      setQueries((prev) => [...prev, query]);
+      setInputValue("");
 
       // Scroll to bottom
       setTimeout(() => {

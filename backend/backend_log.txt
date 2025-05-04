@@ -1,0 +1,16 @@
+WARNING:utils.video_analyzer_enhanced:MongoDB not available: No module named 'utils.mongodb'
+INFO:utils.video_analyzer_enhanced:Initializing VideoAnalyzer (using Groq for frames: True, MongoDB available: False, GPU available: False)
+/Users/radhikadanda/llamaCon-2025/backend/app/main.py:64: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+/Users/radhikadanda/llamaCon-2025/backend/app/main.py:68: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("shutdown")

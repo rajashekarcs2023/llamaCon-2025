@@ -1,0 +1,1105 @@
+from app.mongo_encoder import mongo_response
+from app.utils import MongoJSONResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from typing import List, Optional, Dict, Any, Callable
+import os
+import uuid
+import shutil
+from datetime import datetime
+import json
+import asyncio
+import concurrent.futures
+from functools import partial
+import logging
+from dotenv import load_dotenv
+from bson import ObjectId
+
+# Custom JSON encoder to handle MongoDB ObjectId
+class MongoJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, ObjectId):
+            return str(obj)
+        return super().default(obj)
+
+# Import models
+from models.video import VideoFeed
+from models.suspect import Suspect
+from models.timeline import TimelineEvent
+from models.graph import GraphData, GraphNode, GraphEdge
+from models.analysis import AnalysisRequest, AnalysisResult
+from models.query import Query
+
+# Import utilities
+from utils.video_analyzer_enhanced import video_analyzer
+from utils.llama_client import llama_client
+from utils.groq_client import groq_client
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Get environment variables
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+ALLOW_CREDENTIALS = os.getenv("ALLOW_CREDENTIALS", "True").lower() == "true"
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))
+USE_GPU = os.getenv("USE_GPU", "True").lower() == "true"
+
+# Create FastAPI app
+app = FastAPI(
+    title="Reconstruct API",
+    description="Backend API for Reconstruct - CCTV Analysis System",
+    version="1.0.0"
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL],  # Only allow requests from our frontend
+    allow_credentials=ALLOW_CREDENTIALS,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["*"],
+)
+
+# Create data directories if they don't exist
+os.makedirs("data/videos", exist_ok=True)
+os.makedirs("data/suspects", exist_ok=True)
+os.makedirs("data/results", exist_ok=True)
+os.makedirs("data/thumbnails", exist_ok=True)
+
+# Create a thread pool executor for parallel processing
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+# Dependency for checking if GPU is available and enabled
+def get_gpu_preference():
+    return USE_GPU
+
+# Import database connectors
+from utils.db_connector import mongodb
+
+# Initialize MongoDB connection
+@app.on_event("startup")
+async def startup_db_client():
+    await mongodb.connect_async()
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    mongodb.disconnect()
+
+# Health check endpoint
+@app.get("/")
+async def health_check():
+    return {"status": "healthy", "service": "Reconstruct API"}
+
+# Mount static files for serving videos and images
+app.mount("/static", StaticFiles(directory="data"), name="static")
+
+# Video Endpoints
+@app.post("/videos/upload", response_model=VideoFeed)
+async def upload_video(
+    file: UploadFile = File(...),
+    name: str = Form(None),
+    location: str = Form(None),
+    timestamp: str = Form(None),
+    background_tasks: BackgroundTasks = None,
+    use_gpu: bool = Depends(get_gpu_preference)
+):
+    """Upload a CCTV video file with metadata"""
+    # Generate a unique ID for the video
+    video_id = f"video-{uuid.uuid4()}"
+    
+    # Create file path
+    file_path = f"data/videos/{video_id}.mp4"
+    
+    # Save the uploaded file
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Set default values if not provided
+    if not name:
+        name = file.filename
+    if not location:
+        location = "Unknown"
+    if not timestamp:
+        timestamp = datetime.now().isoformat()
+    
+    # Process video in background (extract frames, etc.)
+    if background_tasks:
+        background_tasks.add_task(video_analyzer.process_video, file_path, video_id, {
+            "name": name,
+            "location": location,
+            "timestamp": timestamp
+        })
+    
+    # Create video metadata
+    video_data = {
+        "id": video_id,
+        "name": name,
+        "location": location,
+        "timestamp": timestamp,
+        "duration": 0,  # Will be updated after processing
+        "fileUrl": f"/static/videos/{video_id}.mp4",
+        "thumbnailUrl": f"/static/thumbnails/{video_id}_thumb.jpg",
+        "size": os.path.getsize(file_path),
+        "processed": False,
+        "processing_options": {
+            "use_gpu": use_gpu
+        }
+    }
+    
+    # Store in database
+    await mongodb.insert_one_async("videos", video_data)
+    
+    return video_data
+
+@app.get("/videos", response_model=List[VideoFeed])
+async def get_videos():
+    """Get all uploaded videos"""
+    videos = await mongodb.find_many_async("videos", {})
+    return videos
+
+@app.get("/videos/{video_id}", response_model=VideoFeed)
+async def get_video(video_id: str):
+    """Get a specific video by ID"""
+    video = await mongodb.find_one_async("videos", {"id": video_id})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return video
+
+# Suspect Endpoints
+@app.post("/suspects/upload", response_model=Suspect)
+async def upload_suspect(
+    file: UploadFile = File(...),
+    name: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    use_gpu: bool = Depends(get_gpu_preference)
+):
+    """Upload a suspect image with optional metadata"""
+    # Generate a unique ID for the suspect
+    suspect_id = f"suspect-{uuid.uuid4()}"
+    
+    # Create file path
+    file_path = f"data/suspects/{suspect_id}.jpg"
+    
+    # Save the uploaded file
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Create suspect metadata
+    suspect_data = {
+        "id": suspect_id,
+        "imageUrl": f"/suspects/{suspect_id}.jpg",
+        "name": name or "Unknown",
+        "description": description or "",
+        "lastSeen": None
+    }
+    
+    # Store in database
+    await mongodb.insert_one_async("suspects", suspect_data)
+    
+    return suspect_data
+
+@app.get("/suspects", response_model=List[Suspect])
+async def get_suspects():
+    """Get all uploaded suspects"""
+    suspects = await mongodb.find_many_async("suspects", {})
+    return suspects
+
+@app.get("/suspects/{suspect_id}", response_model=Suspect)
+async def get_suspect(suspect_id: str):
+    """Get a specific suspect by ID"""
+    suspect = await mongodb.find_one_async("suspects", {"id": suspect_id})
+    if not suspect:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+    return suspect
+
+# Analysis Endpoints
+@app.post("/analysis/track-suspect")
+async def analyze_suspect(
+    request: AnalysisRequest,
+    background_tasks: BackgroundTasks,
+    use_gpu: bool = Depends(get_gpu_preference)
+):
+    """Run suspect tracking analysis across selected videos"""
+    # Validate request
+    suspect = await mongodb.find_one_async("suspects", {"id": request.suspectId})
+    if not suspect:
+        raise HTTPException(status_code=404, detail="Suspect not found")
+    
+    for video_id in request.videoIds:
+        video = await mongodb.find_one_async("videos", {"id": video_id})
+        if not video:
+            raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+    
+    # Generate a unique ID for the analysis
+    analysis_id = f"analysis-{uuid.uuid4()}"
+    
+    # Create analysis result with enhanced fields
+    analysis_result = {
+        "id": analysis_id,
+        "suspectId": request.suspectId,
+        "timeline": [],  # Will be populated by background task
+        "graph": {"nodes": [], "edges": []},  # Will be populated by background task
+        "summary": "Analysis in progress...",
+        "enhancedNarrative": "",  # Will be populated by background task
+        "activitySummary": "",  # Will be populated by background task
+        "locations": [],  # Will be populated by background task
+        "duration": 0,  # Will be populated by background task
+        "firstSeen": "",  # Will be populated by background task
+        "lastSeen": "",  # Will be populated by background task
+        "visualTimeline": []  # Will be populated by background task
+    }
+    
+    # Store in database
+    await mongodb.insert_one_async("analyses", analysis_result)
+    
+    # Run analysis in background with GPU preference
+    background_tasks.add_task(
+        run_analysis,
+        analysis_id,
+        request.suspectId,
+        request.videoIds,
+        request.timeframe,
+        request.options,
+        use_gpu
+    )
+    
+    return mongo_response(analysis_result)
+
+@app.get("/analysis/{analysis_id}", response_model=AnalysisResult)
+async def get_analysis(analysis_id: str):
+    """Get analysis results by ID"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return mongo_response(analysis)
+
+# Timeline Endpoints
+@app.get("/timeline/{analysis_id}")
+async def get_timeline(analysis_id: str):
+    """Get timeline for a specific analysis"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return mongo_response(analysis.get("timeline", []))
+
+@app.post("/timeline/generate")
+async def generate_enhanced_timeline(
+    request: Dict[str, Any],
+    background_tasks: BackgroundTasks
+):
+    """Generate an enhanced timeline with detailed narrative"""
+    analysis_id = request.get("analysisId")
+    if not analysis_id:
+        raise HTTPException(status_code=400, detail="Analysis ID is required")
+    
+    # Check if analysis exists
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    
+    # Generate a unique ID for this timeline
+    timeline_id = f"timeline-{uuid.uuid4()}"
+    
+    # Create initial timeline result
+    timeline_result = {
+        "id": timeline_id,
+        "analysisId": analysis_id,
+        "status": "processing",
+        "events": [],
+        "narrative": "Timeline generation in progress...",
+        "visualTimeline": []
+    }
+    
+    # Store initial result
+    await mongodb.insert_one_async("timelines", timeline_result)
+    
+    # Run timeline generation in background
+    background_tasks.add_task(
+        run_enhanced_timeline_generation,
+        timeline_id,
+        analysis_id
+    )
+    
+    return timeline_result
+
+@app.get("/timeline/enhanced/{timeline_id}")
+async def get_enhanced_timeline(timeline_id: str):
+    """Get enhanced timeline by ID"""
+    timeline = await mongodb.find_one_async("timelines", {"id": timeline_id})
+    if not timeline:
+        raise HTTPException(status_code=404, detail="Timeline not found")
+    return timeline
+
+# Graph Endpoints
+@app.get("/graph/{analysis_id}", response_model=GraphData)
+async def get_graph(analysis_id: str):
+    """Get knowledge graph for a specific analysis"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return mongo_response(analysis["graph"])
+
+# Narration Endpoints
+@app.get("/narrate/{analysis_id}")
+async def get_narration(analysis_id: str, language: str = "en"):
+    """Get narration for a specific analysis in the specified language"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    
+    if not analysis.get("narrationUrl"):
+        # Generate narration if not already available
+        narration = await generate_narration(analysis, language)
+        analysis["narrationUrl"] = narration["url"]
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {"narrationUrl": narration["url"]})
+    
+    return {"narrationUrl": analysis["narrationUrl"]}
+
+# Query Endpoints
+@app.post("/query", response_model=Query)
+async def submit_query(query: Dict[str, Any]):
+    """Submit a natural language query about an analysis"""
+    query_id = f"query-{uuid.uuid4()}"
+    
+    # Extract query text and analysis ID
+    query_text = query.get("text")
+    analysis_id = query.get("analysisId")
+    
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Query text is required")
+    
+    # Check if analysis exists if ID is provided
+    if analysis_id:
+        analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+    
+    # Process query using LLaMA
+    if analysis_id:
+        # Get analysis data
+        analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+        timeline = analysis.get("timeline", [])
+        graph = analysis.get("graph", {"nodes": [], "edges": []})
+        
+        # Prepare context for LLaMA
+        context = {
+            "timeline": timeline,
+            "graph": graph,
+            "summary": analysis.get("summary", "")
+        }
+        
+        # Create prompt with context
+        prompt = f"""You are an AI assistant helping with a CCTV investigation.
+        Below is the data from our analysis of a suspect tracked across multiple cameras.
+        
+        TIMELINE:
+        {json.dumps(, cls=MongoJSONEncodertimeline, indent=2)}
+        
+        GRAPH DATA:
+        {json.dumps(, cls=MongoJSONEncodergraph, indent=2)}
+        
+        SUMMARY:
+        {analysis.get('summary', '')}
+        
+        Based on this information, please answer the following question:
+        {query_text}
+        
+        Provide a detailed answer using only the information available in the data.
+        If the answer cannot be determined from the data, please say so.
+        """
+    else:
+        # General query without specific analysis
+        prompt = f"""You are an AI assistant helping with a CCTV investigation.
+        Please answer the following question about video surveillance and suspect tracking:
+        
+        {query_text}
+        
+        Provide a helpful and informative answer.
+        """
+    
+    # Call LLaMA API
+    messages = [
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+    
+    llama_response = llama_client.chat_completion(messages)
+    response_text = llama_response["choices"][0]["message"]["content"]
+    
+    # Create visual data if applicable
+    visual_data = None
+    if analysis_id and any(keyword in query_text.lower() for keyword in ["where", "location", "when", "time"]):
+        # For location/time queries, provide a visual from the timeline
+        if timeline:
+            # Find most relevant event
+            relevant_event = timeline[0]  # Default to first event
+            
+            # Simple keyword matching to find most relevant event
+            for event in timeline:
+                if any(keyword in query_text.lower() for keyword in event.get("description", "").lower().split()):
+                    relevant_event = event
+                    break
+            
+            visual_data = {
+                "type": "image",
+                "url": relevant_event.get("thumbnailUrl", "")
+            }
+    
+    # Create query response
+    response = {
+        "text": response_text,
+        "visualData": visual_data
+    }
+    
+    # Create query record
+    query_data = {
+        "id": query_id,
+        "text": query_text,
+        "timestamp": datetime.now().isoformat(),
+        "response": response
+    }
+    
+    # Store in database
+    await mongodb.insert_one_async("queries", query_data)
+    
+    return query_data
+
+# Summary Endpoint
+@app.get("/summary/{analysis_id}", response_model=str)
+async def get_summary(analysis_id: str):
+    """Get a detailed summary of the analysis"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return mongo_response(analysis.get("summary", "No summary available"))
+
+# Suspicious Behavior Endpoint
+@app.post("/analysis/suspicious", response_model=Dict[str, Any])
+async def detect_suspicious_behavior(
+    request: Dict[str, List[str]],
+    background_tasks: BackgroundTasks,
+    use_gpu: bool = Depends(get_gpu_preference)
+):
+    """Detect suspicious behavior in videos"""
+    video_ids = request.get("videoIds", [])
+    
+    if not video_ids:
+        raise HTTPException(status_code=400, detail="No videos provided")
+    
+    # Generate a unique ID for this analysis
+    analysis_id = f"suspicious-{uuid.uuid4()}"
+    
+    # Get video metadata
+    videos = []
+    for video_id in video_ids:
+        video = await mongodb.find_one_async("videos", {"id": video_id})
+        if video:
+            videos.append(video)
+    
+    if not videos:
+        raise HTTPException(status_code=404, detail="No valid videos found")
+    
+    # Create initial analysis result
+    analysis_result = {
+        "id": analysis_id,
+        "status": "processing",
+        "videoIds": video_ids,
+        "suspiciousEvents": [],
+        "summary": "Analysis in progress..."
+    }
+    
+    # Store initial result
+    await mongodb.insert_one_async("analyses", analysis_result)
+    
+    # Run analysis in background
+    background_tasks.add_task(
+        run_suspicious_behavior_detection,
+        analysis_id,
+        videos,
+        use_gpu
+    )
+    
+    return mongo_response(analysis_result)
+
+@app.get("/suspicious/{analysis_id}", response_model=Dict[str, Any])
+async def get_suspicious_behavior(analysis_id: str):
+    """Get suspicious behavior detection results"""
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return mongo_response(analysis)
+
+# Background task for suspicious behavior detection
+async def run_suspicious_behavior_detection(
+    analysis_id: str,
+    videos: List[Dict[str, Any]],
+    use_gpu: bool = True
+):
+    """Run suspicious behavior detection in the background"""
+    try:
+        # Update status
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {"status": "processing"})
+        
+        suspicious_events = []
+        
+        # Process each video
+        for video in videos:
+            video_id = video.get("id")
+            video_path = f"data/videos/{video_id}.mp4"
+            video_location = video.get("location", "Unknown")
+            
+            # Extract frames if not already done
+            frames_dir = f"data/videos/frames/{video_id}"
+            if not os.path.exists(frames_dir):
+                os.makedirs(frames_dir, exist_ok=True)
+                await video_analyzer.process_video(video_path, video_id, video, use_gpu)
+            
+            # Analyze frames for suspicious behavior
+            frames = os.listdir(frames_dir)
+            frames = [f for f in frames if f.endswith(".jpg")]
+            
+            for frame_file in frames:
+                frame_path = os.path.join(frames_dir, frame_file)
+                
+                # Use Groq for faster frame analysis
+                prompt = f"""
+                Analyze this CCTV frame and determine if there is any suspicious behavior.
+                Focus on:
+                1. Unusual movements or postures
+                2. Potential theft or concealment of items
+                3. Aggressive behavior
+                4. Loitering in restricted areas
+                5. Unusual interactions with objects or people
+                
+                If suspicious behavior is detected, describe it in detail and explain why it's suspicious.
+                If no suspicious behavior is detected, just respond with "No suspicious behavior detected."
+                
+                Format your response as a JSON object with these fields:
+                - suspicious: boolean (true if suspicious behavior detected, false otherwise)
+                - description: string (detailed description of the suspicious behavior if detected)
+                - confidence: number (0-100, your confidence in this assessment)
+                """
+                
+                response = groq_client.analyze_image(frame_path, prompt)
+                content = response["choices"][0]["message"]["content"]
+                
+                try:
+                    # Parse the JSON response
+                    result = json.loads(content)
+                    
+                    # If suspicious behavior detected with reasonable confidence
+                    if result.get("suspicious", False) and result.get("confidence", 0) > 50:
+                        # Extract frame number from filename
+                        frame_num = int(frame_file.split("_")[1].split(".")[0])
+                        
+                        # Create a copy of the frame in a suspicious folder
+                        suspicious_dir = f"data/suspicious/{analysis_id}"
+                        os.makedirs(suspicious_dir, exist_ok=True)
+                        suspicious_frame_path = f"{suspicious_dir}/{video_id}_{frame_file}"
+                        shutil.copy(frame_path, suspicious_frame_path)
+                        
+                        # Add to suspicious events
+                        suspicious_events.append({
+                            "id": f"suspicious-{uuid.uuid4()}",
+                            "videoId": video_id,
+                            "location": video_location,
+                            "frameNumber": frame_num,
+                            "timestamp": video.get("timestamp", ""),
+                            "description": result.get("description", ""),
+                            "confidence": result.get("confidence", 0),
+                            "thumbnailUrl": f"/static/suspicious/{analysis_id}/{video_id}_{frame_file}"
+                        })
+                except json.JSONDecodeError:
+                    logger.error(f"Error parsing JSON response for frame {frame_file}")
+                    continue
+        
+        # Generate summary using LLaMA
+        if suspicious_events:
+            prompt = f"""
+            Generate a comprehensive summary of the following suspicious behaviors detected across multiple CCTV cameras:
+            
+            {json.dumps(, cls=MongoJSONEncodersuspicious_events, indent=2)}
+            
+            Focus on patterns, potential security threats, and recommendations for security personnel.
+            The summary should be detailed but concise, highlighting the most concerning behaviors.
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+            
+            response = llama_client.chat_completion(messages)
+            summary = response["choices"][0]["message"]["content"]
+        else:
+            summary = "No suspicious behavior detected in any of the analyzed videos."
+        
+        # Update analysis with results
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "status": "completed",
+            "suspiciousEvents": suspicious_events,
+            "summary": summary
+        })
+        
+    except Exception as e:
+        # Update analysis with error
+        logger.error(f"Error in suspicious behavior detection: {str(e)}")
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "status": "error",
+            "summary": f"Error during analysis: {str(e)}"
+        })
+
+# Background task for running the full analysis
+async def run_analysis(
+    analysis_id: str,
+    suspect_id: str,
+    video_ids: List[str],
+    timeframe: Optional[Dict[str, str]] = None,
+    options: Optional[Dict[str, Any]] = None,
+    use_gpu: bool = True
+):
+    """Run the full analysis pipeline in the background"""
+    try:
+        # Get suspect and video data
+        suspect = await mongodb.find_one_async("suspects", {"id": suspect_id})
+        videos = []
+        for video_id in video_ids:
+            video = await mongodb.find_one_async("videos", {"id": video_id})
+            if video:
+                videos.append(video)
+        
+        # Process videos in parallel
+        unprocessed_videos = [video for video in videos if not video.get("processed", False)]
+        if unprocessed_videos:
+            logger.info(f"Processing {len(unprocessed_videos)} videos in parallel")
+            
+            # Create processing tasks for each video
+            processing_tasks = []
+            for video in unprocessed_videos:
+                logger.info(f"Preparing to process video: {video['id']}")
+                # Create a partial function with all parameters except the one that will be run in parallel
+                process_func = partial(
+                    video_analyzer.process_video,
+                    f"data/videos/{video['id']}.mp4",
+                    video['id'],
+                    {
+                        "name": video.get("name", ""),
+                        "location": video.get("location", ""),
+                        "timestamp": video.get("timestamp", "")
+                    },
+                    use_gpu
+                )
+                processing_tasks.append(process_func)
+            
+            # Run video processing in parallel using ThreadPoolExecutor
+            loop = asyncio.get_event_loop()
+            await asyncio.gather(*[
+                loop.run_in_executor(executor, task)
+                for task in processing_tasks
+            ])
+            
+            # Now analyze frames in parallel
+            analyze_tasks = []
+            for video in unprocessed_videos:
+                analyze_func = partial(video_analyzer.analyze_frames, video['id'], use_gpu)
+                analyze_tasks.append(analyze_func)
+            
+            await asyncio.gather(*[
+                loop.run_in_executor(executor, task)
+                for task in analyze_tasks
+            ])
+        
+        # Track suspect across videos
+        tracking_results = await video_analyzer.track_suspect(suspect, videos, timeframe)
+        
+        # Store tracking results
+        for result in tracking_results:
+            await mongodb.insert_one_async("tracking_results", result)
+        
+        # Generate timeline
+        timeline = await video_analyzer.generate_timeline(tracking_results)
+        
+        # Build knowledge graph
+        graph = await video_analyzer.build_knowledge_graph(tracking_results)
+        
+        # Generate enhanced narrative and summary using LLaMA
+        summary = await video_analyzer.generate_summary(timeline)
+        
+        # Generate enhanced narrative
+        enhanced_narrative = await video_analyzer.generate_enhanced_narrative(timeline, tracking_results)
+        
+        # Generate activity summary
+        activity_summary = await video_analyzer.generate_activity_summary(timeline, tracking_results)
+        
+        # Extract locations from timeline
+        locations = list(set([event.get("location", "Unknown") for event in timeline]))
+        
+        # Calculate duration (in minutes)
+        first_seen = min([event.get("timestamp") for event in timeline], default=datetime.now().isoformat())
+        last_seen = max([event.get("timestamp") for event in timeline], default=datetime.now().isoformat())
+        
+        try:
+            first_time = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
+            last_time = datetime.fromisoformat(last_seen.replace('Z', '+00:00'))
+            duration_minutes = int((last_time - first_time).total_seconds() / 60)
+        except:
+            duration_minutes = 0
+            
+        # Generate visual timeline for enhanced view
+        visual_timeline = await video_analyzer.generate_visual_timeline(timeline, graph)
+        
+        # Generate narration if requested
+        narration_url = None
+        if options and options.get("includeNarration"):
+            language = options.get("language", "en")
+            
+            # Generate narration text using LLaMA
+            narration_prompt = f"""Generate a detailed narration of the following timeline of events in {language} language.
+            Make it sound like a detective explaining the movements of a suspect across multiple CCTV cameras.
+            
+            {json.dumps(, cls=MongoJSONEncodertimeline, indent=2)}
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": narration_prompt
+                }
+            ]
+            
+            response = llama_client.chat_completion(messages)
+            narration_text = response["choices"][0]["message"]["content"]
+            
+            # In a real implementation, we would convert this text to speech
+            # For now, we'll just store the text in a file
+            narration_file = f"data/results/{analysis_id}_narration.txt"
+            os.makedirs(os.path.dirname(narration_file), exist_ok=True)
+            
+            with open(narration_file, "w") as f:
+                f.write(narration_text)
+            
+            narration_url = f"/results/{analysis_id}_narration.txt"
+        
+        # Update analysis result with enhanced fields
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "timeline": timeline,
+            "graph": graph,
+            "summary": summary,
+            "narrationUrl": narration_url,
+            "enhancedNarrative": enhanced_narrative,
+            "activitySummary": activity_summary,
+            "locations": locations,
+            "duration": duration_minutes,
+            "firstSeen": first_seen,
+            "lastSeen": last_seen,
+            "visualTimeline": visual_timeline
+        })
+        
+    except Exception as e:
+        # Update analysis with error
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "summary": f"Error during analysis: {str(e)}"
+        })
+
+# Background task for enhanced timeline generation
+async def run_enhanced_timeline_generation(
+    timeline_id: str,
+    analysis_id: str
+):
+    """Run enhanced timeline generation in the background"""
+    try:
+        # Update status
+        await mongodb.update_one_async("timelines", {"id": timeline_id}, {"status": "processing"})
+        
+        # Get the analysis data
+        analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+        if not analysis:
+            raise ValueError(f"Analysis {analysis_id} not found")
+        
+        # Get the timeline events
+        timeline_events = analysis.get("timeline", [])
+        if not timeline_events:
+            raise ValueError("No timeline events found in the analysis")
+        
+        # Get video metadata for location information
+        video_ids = analysis.get("videoIds", [])
+        videos = []
+        for video_id in video_ids:
+            video = await mongodb.find_one_async("videos", {"id": video_id})
+            if video:
+                videos.append(video)
+        
+        # Create a mapping of video IDs to locations
+        video_locations = {}
+        for video in videos:
+            video_locations[video.get("id")] = video.get("location", "Unknown")
+        
+        # Enhance the timeline events with location information
+        enhanced_events = []
+        for event in timeline_events:
+            video_id = event.get("videoId")
+            location = video_locations.get(video_id, "Unknown Location")
+            
+            enhanced_event = {
+                **event,
+                "location": location
+            }
+            enhanced_events.append(enhanced_event)
+        
+        # Sort events by timestamp
+        enhanced_events.sort(key=lambda x: x.get("timestamp", ""))
+        
+        # Generate a detailed narrative using LLaMA
+        prompt = f"""
+        Generate a detailed narrative of the following timeline of events:
+        
+        {json.dumps(, cls=MongoJSONEncoderenhanced_events, indent=2)}
+        
+        The narrative should:
+        1. Be chronological and flow naturally
+        2. Include specific times, locations, and descriptions
+        3. Highlight important movements and activities
+        4. Be written in a professional, investigative style
+        5. Be comprehensive but concise
+        
+        Format the narrative as a cohesive story that would be useful for law enforcement or security personnel.
+        """
+        
+        messages = [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = llama_client.chat_completion(messages)
+        narrative = response["choices"][0]["message"]["content"]
+        
+        # Generate visual timeline for enhanced view
+        visual_timeline = []
+        for i, event in enumerate(enhanced_events):
+            # Format timestamp
+            timestamp = event.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                formatted_time = dt.strftime("%I:%M:%S %p")
+            except (ValueError, TypeError):
+                formatted_time = timestamp
+            
+            # Determine if this is a location change
+            is_location_change = False
+            if i > 0:
+                prev_location = enhanced_events[i-1].get("location", "Unknown")
+                current_location = event.get("location", "Unknown")
+                is_location_change = prev_location != current_location
+            
+            # Create visual event
+            visual_event = {
+                "id": event.get("id", f"event-{i}"),
+                "time": formatted_time,
+                "location": event.get("location", "Unknown"),
+                "description": event.get("description", ""),
+                "thumbnailUrl": event.get("thumbnailUrl", ""),
+                "confidence": event.get("confidence", 0),
+                "isLocationChange": is_location_change
+            }
+            
+            visual_timeline.append(visual_event)
+        
+        # Update timeline with results
+        await mongodb.update_one_async("timelines", {"id": timeline_id}, {
+            "status": "completed",
+            "events": enhanced_events,
+            "narrative": narrative,
+            "visualTimeline": visual_timeline
+        })
+        
+    except Exception as e:
+        # Update timeline with error
+        logger.error(f"Error in enhanced timeline generation: {str(e)}")
+        await mongodb.update_one_async("timelines", {"id": timeline_id}, {
+            "status": "error",
+            "narrative": f"Error generating timeline: {str(e)}"
+        })
+
+# Background task for general video analysis
+async def run_general_analysis(
+    analysis_id: str,
+    video_ids: List[str],
+    options: Dict[str, Any] = None,
+    use_gpu: bool = True
+):
+    """Run general video analysis in the background"""
+    try:
+        # Update status
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {"status": "processing"})
+        
+        # Get video metadata
+        videos = []
+        for video_id in video_ids:
+            video = await mongodb.find_one_async("videos", {"id": video_id})
+            if video:
+                videos.append(video)
+        
+        if not videos:
+            raise ValueError("No valid videos found")
+        
+        # Process each video
+        video_analyses = []
+        
+        for video in videos:
+            video_id = video.get("id")
+            video_path = f"data/videos/{video_id}.mp4"
+            video_location = video.get("location", "Unknown")
+            
+            # Extract frames if not already done
+            frames_dir = f"data/videos/frames/{video_id}"
+            if not os.path.exists(frames_dir):
+                os.makedirs(frames_dir, exist_ok=True)
+                await video_analyzer.process_video(video_path, video_id, video, use_gpu)
+            
+            # Analyze frames for general content
+            frames = os.listdir(frames_dir)
+            frames = [f for f in frames if f.endswith(".jpg")]
+            frames.sort()  # Sort frames by name
+            
+            # Select a subset of frames for analysis (e.g., every 10th frame)
+            selected_frames = frames[::10]
+            if len(selected_frames) > 10:
+                selected_frames = selected_frames[:10]  # Limit to 10 frames for efficiency
+            
+            frame_analyses = []
+            
+            for frame_file in selected_frames:
+                frame_path = os.path.join(frames_dir, frame_file)
+                
+                # Use Groq for faster frame analysis
+                prompt = f"""
+                Analyze this CCTV frame and describe what you see in detail.
+                Focus on:
+                1. People present (approximate count, general description)
+                2. Activities taking place
+                3. Objects of interest
+                4. Environmental context
+                
+                Format your response as a JSON object with these fields:
+                - people: array of people descriptions
+                - activities: array of activities observed
+                - objects: array of notable objects
+                - environment: string describing the setting
+                - summary: brief one-sentence summary
+                """
+                
+                response = groq_client.analyze_image(frame_path, prompt)
+                content = response["choices"][0]["message"]["content"]
+                
+                try:
+                    # Parse the JSON response
+                    result = json.loads(content)
+                    
+                    # Extract frame number from filename
+                    frame_num = int(frame_file.split("_")[1].split(".")[0])
+                    
+                    # Add to frame analyses
+                    frame_analyses.append({
+                        "frameNumber": frame_num,
+                        "thumbnailUrl": f"/static/videos/frames/{video_id}/{frame_file}",
+                        "analysis": result
+                    })
+                except json.JSONDecodeError:
+                    logger.error(f"Error parsing JSON response for frame {frame_file}")
+                    continue
+            
+            # Generate video-level analysis using LLaMA
+            if frame_analyses:
+                prompt = f"""
+                Generate a comprehensive analysis of the following CCTV footage based on the analyzed frames:
+                
+                Location: {video_location}
+                Timestamp: {video.get("timestamp", "Unknown")}
+                
+                Frame Analyses:
+                {json.dumps(, cls=MongoJSONEncoderframe_analyses, indent=2)}
+                
+                Provide:
+                1. A detailed narrative of what's happening in this footage
+                2. Key activities observed
+                3. Notable patterns or behaviors
+                4. Security or safety concerns if any
+                
+                Format your response as a detailed paragraph that would be helpful for security personnel.
+                """
+                
+                messages = [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+                
+                response = llama_client.chat_completion(messages)
+                narrative = response["choices"][0]["message"]["content"]
+            else:
+                narrative = "No frames were successfully analyzed for this video."
+            
+            # Add to video analyses
+            video_analyses.append({
+                "videoId": video_id,
+                "location": video_location,
+                "timestamp": video.get("timestamp", ""),
+                "frames": frame_analyses,
+                "narrative": narrative
+            })
+        
+        # Generate overall summary using LLaMA
+        if video_analyses:
+            prompt = f"""
+            Generate a comprehensive summary of the following analyses from multiple CCTV cameras:
+            
+            {json.dumps(, cls=MongoJSONEncodervideo_analyses, indent=2)}
+            
+            The summary should:
+            1. Provide an overview of activities across all cameras
+            2. Highlight important events or patterns
+            3. Note any security concerns
+            4. Be written in a professional, investigative style
+            
+            Format the summary as a cohesive narrative that would be useful for security personnel.
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+            
+            response = llama_client.chat_completion(messages)
+            summary = response["choices"][0]["message"]["content"]
+        else:
+            summary = "No videos were successfully analyzed."
+        
+        # Update analysis with results
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "status": "completed",
+            "videoAnalyses": video_analyses,
+            "summary": summary
+        })
+        
+    except Exception as e:
+        # Update analysis with error
+        logger.error(f"Error in general video analysis: {str(e)}")
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "status": "error",
+            "summary": f"Error during analysis: {str(e)}"
+        })

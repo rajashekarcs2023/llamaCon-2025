@@ -1,0 +1,1695 @@
+import os
+import cv2
+import numpy as np
+import logging
+import asyncio
+import json
+import time
+import uuid
+import concurrent.futures
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple
+from PIL import Image
+import base64
+import tempfile
+import threading
+from functools import partial
+
+# Import our clients
+from utils.llama_client import llama_client
+from utils.groq_client import groq_client
+from utils.db_connector import mongodb
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class VideoAnalyzer:
+    """
+    Core video analysis pipeline for processing CCTV footage and tracking suspects
+    Enhanced with Llama 4's long context and multimodal capabilities
+    """
+    def __init__(self, use_groq_for_frames=True):
+        """
+        Initialize the VideoAnalyzer
+        
+        Args:
+            use_groq_for_frames: Whether to use Groq for frame analysis (faster but may be less accurate)
+        """
+        self.use_groq_for_frames = use_groq_for_frames
+        self.mongodb_available = True  # Assume MongoDB is available by default
+        
+        # Use sequential processing instead of parallel processing
+        # self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self.use_sequential = True  # Flag to indicate sequential processing
+        
+        # Thread lock for GPU operations
+        self.gpu_lock = threading.Lock()
+        
+        # Check if MongoDB is available
+        try:
+            # Try to connect to MongoDB
+            from utils.mongodb import mongodb
+            # If this doesn't raise an exception, MongoDB is available
+        except Exception as e:
+            logger.warning(f"MongoDB not available: {str(e)}")
+            self.mongodb_available = False
+        
+        # Check if GPU is available for OpenCV
+        self.has_gpu = cv2.cuda.getCudaEnabledDeviceCount() > 0
+        
+        logger.info(f"Initializing VideoAnalyzer (using Groq for frames: {use_groq_for_frames}, MongoDB available: {self.mongodb_available}, GPU available: {self.has_gpu})")
+    
+    def process_video(self, video_path: str, video_id: str, metadata: Dict[str, Any], use_gpu: bool = False) -> Dict[str, Any]:
+        """
+        Process a video file to extract frames and metadata
+        This is a synchronous version of the method for parallel processing
+        
+        Args:
+            video_path: Path to the video file
+            video_id: Unique ID of the video
+            metadata: Video metadata including location and timestamp
+            use_gpu: Whether to use GPU acceleration if available
+        
+        Returns:
+            Dict with video processing results
+        """
+        """
+        Process a video file to extract frames and metadata
+        
+        Args:
+            video_path: Path to the video file
+            video_id: Unique ID of the video
+            metadata: Video metadata including location and timestamp
+        
+        Returns:
+            Dict with video processing results
+        """
+        logger.info(f"Processing video: {video_path}")
+        
+        try:
+            # Open the video file
+            cap = cv2.VideoCapture(video_path)
+            
+            if not cap.isOpened():
+                logger.error(f"Error opening video file: {video_path}")
+                return {"error": "Failed to open video file"}
+            
+            # Get video properties
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps if fps > 0 else 0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Create frames directory if it doesn't exist
+            frames_dir = f"data/videos/frames/{video_id}"
+            os.makedirs(frames_dir, exist_ok=True)
+            
+            # Extract frames at regular intervals (1 frame per second)
+            frame_interval = int(fps)
+            frames_extracted = 0
+            
+            # Generate thumbnail from first frame and check orientation
+            ret, frame = cap.read()
+            if ret:
+                # Check video orientation and rotate if needed
+                # This fixes the upside-down video issue
+                # Get video rotation from metadata if available
+                rotation = 0
+                try:
+                    # Try to get rotation from video metadata
+                    # For simplicity, we'll check the height/width ratio
+                    # If height > width * 1.5, it might be a portrait video that needs rotation
+                    if height > width * 1.5:
+                        # Likely a portrait video, check if it needs rotation
+                        # We'll analyze the first frame to detect if it's upside down
+                        # For a more robust solution, you'd use proper metadata analysis
+                        # or computer vision to detect orientation
+                        rotation = 180  # Assume it needs 180 degree rotation if portrait
+                except Exception as e:
+                    logger.warning(f"Could not determine video orientation: {str(e)}")
+                
+                # Rotate frame if needed
+                if rotation != 0:
+                    logger.info(f"Rotating video by {rotation} degrees")
+                    # Get the rotation matrix
+                    M = cv2.getRotationMatrix2D((width/2, height/2), rotation, 1)
+                    # Apply the rotation to the frame
+                    frame = cv2.warpAffine(frame, M, (width, height))
+                
+                # Save thumbnail
+                thumbnail_path = f"data/thumbnails/{video_id}_thumb.jpg"
+                cv2.imwrite(thumbnail_path, frame)
+            
+            # Extract frames
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to beginning
+            current_frame = 0
+            
+            # Store frame metadata
+            frame_metadata = []
+            
+            # Set base timestamp from metadata
+            if "timestamp" in metadata and metadata["timestamp"]:
+                try:
+                    base_timestamp = datetime.fromisoformat(metadata["timestamp"].replace('Z', '+00:00'))
+                except (ValueError, TypeError):
+                    base_timestamp = datetime.now()
+            else:
+                base_timestamp = datetime.now()
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if current_frame % frame_interval == 0:
+                    # Calculate timestamp for this frame
+                    frame_time = base_timestamp + timedelta(seconds=current_frame/fps)
+                    frame_timestamp = frame_time.isoformat()
+                    
+                    # Save frame
+                    frame_path = f"{frames_dir}/frame_{frames_extracted:04d}.jpg"
+                    cv2.imwrite(frame_path, frame)
+                    
+                    # Store frame metadata
+                    frame_metadata.append({
+                        "id": f"frame_{frames_extracted:04d}",
+                        "videoId": video_id,
+                        "path": frame_path,
+                        "timestamp": frame_timestamp,
+                        "frameIndex": current_frame,
+                        "timeOffset": current_frame / fps
+                    })
+                    
+                    if self.mongodb_available:
+                        # Use synchronous version for parallel processing
+                        try:
+                            mongodb.insert_one("frames", frame_metadata[-1])
+                        except Exception as e:
+                            logger.error(f"Error storing frame in database: {str(e)}")
+                    
+                    frames_extracted += 1
+                
+                current_frame += 1
+            
+            # Release video
+            cap.release()
+            
+            # Update video metadata
+            video_update = {
+                "processed": True,
+                "duration": duration,
+                "frameCount": frame_count,
+                "framesExtracted": frames_extracted,
+                "resolution": f"{width}x{height}",
+                "fps": fps,
+                "thumbnailUrl": f"/videos/{video_id}_thumb.jpg"
+            }
+            
+            # Use synchronous version for parallel processing
+            try:
+                mongodb.update_one("videos", {"id": video_id}, {"$set": video_update})
+            except Exception as e:
+                logger.error(f"Error updating video metadata: {str(e)}")
+            
+            logger.info(f"Video processing complete: {frames_extracted} frames extracted")
+            
+            return {
+                "id": video_id,
+                "frames": frames_extracted,
+                "duration": duration,
+                "thumbnailUrl": f"/videos/{video_id}_thumb.jpg"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing video: {str(e)}")
+            return {"error": str(e)}
+    
+    def analyze_frames(self, video_id: str, use_gpu: bool = False, batch_size: int = 10) -> Dict[str, Any]:
+        """
+        Analyze extracted frames to detect persons using Llama 4's multimodal capabilities
+        This is a synchronous version of the method for parallel processing
+        
+        Args:
+            video_id: ID of the video to analyze
+            use_gpu: Whether to use GPU acceleration if available
+            batch_size: Number of frames to process in parallel
+        
+        Returns:
+            Dict with analysis results
+        """
+        """
+        Analyze extracted frames to detect persons using Llama 4's multimodal capabilities
+        
+        Args:
+            video_id: ID of the video to analyze
+            batch_size: Number of frames to process in parallel
+        
+        Returns:
+            Dict with analysis results
+        """
+        logger.info(f"Analyzing frames for video: {video_id}")
+        
+        try:
+            # Get frames for this video
+            frames = mongodb.find_many("frames", {"videoId": video_id})
+            
+            if not frames:
+                logger.error(f"No frames found for video: {video_id}")
+                return {"error": "No frames found"}
+            
+            logger.info(f"Found {len(frames)} frames to analyze")
+            
+            # Process frames in batches
+            total_processed = 0
+            total_persons_detected = 0
+            
+            # Create batches
+            batches = [frames[i:i+batch_size] for i in range(0, len(frames), batch_size)]
+            
+            for batch_idx, batch in enumerate(batches):
+                logger.info(f"Processing batch {batch_idx+1}/{len(batches)}")
+                
+                # Process batch in parallel
+                tasks = []
+                for frame in batch:
+                    task = self.analyze_single_frame(frame)
+                    tasks.append(task)
+                
+                # Wait for all tasks to complete
+                results = tasks
+                
+                # Update frame data with analysis results
+                for i, result in enumerate(results):
+                    frame = batch[i]
+                    frame_id = frame["id"]
+                    
+                    # Extract persons from result
+                    persons = result.get("persons", [])
+                    total_persons_detected += len(persons)
+                    
+                    # Update frame with detected persons
+                    mongodb.update_one("frames", {"id": frame_id}, {"$set": {"persons": persons, "analyzed": True}})
+                
+                total_processed += len(batch)
+            
+            logger.info(f"Frame analysis complete: {total_processed} frames processed, {total_persons_detected} persons detected")
+            
+            return {
+                "frames_analyzed": total_processed,
+                "persons_detected": total_persons_detected
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing frames: {str(e)}")
+            return {"error": str(e)}
+    
+    def analyze_single_frame(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyze a single frame to detect persons using Llama 4's multimodal capabilities
+        
+        Args:
+            frame: Frame metadata including path
+        
+        Returns:
+            Dict with detected persons
+        """
+        frame_path = frame["path"]
+        
+        try:
+            # Choose which client to use for frame analysis
+            if self.use_groq_for_frames:
+                # Use Groq for faster inference
+                result = groq_client.process_video_frame(frame_path)
+            else:
+                # Use LLaMA for potentially higher quality
+                # Convert local file path to data URL for LLaMA API
+                with open(frame_path, "rb") as image_file:
+                    base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    data_url = f"data:image/jpeg;base64,{base64_image}"
+                
+                result = llama_client.analyze_frame_for_persons(data_url)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing frame {frame['id']}: {str(e)}")
+            return {"persons": []}
+    
+    async def _get_person_features(self, image_path: str) -> Dict[str, Any]:
+        """
+        Extract features from a person image for comparison
+        
+        Args:
+            image_path: Path to the person image
+        
+        Returns:
+            Dictionary with person features
+        """
+        try:
+            # Use Groq to extract person features since it's more reliable
+            prompt = """
+            Analyze this person in the image and extract key identifying features.
+            Focus on:
+            1. Facial features (if visible)
+            2. Body type and build
+            3. Clothing and accessories
+            4. Hair style and color
+            5. Any distinctive characteristics
+            
+            Format your response as a JSON object:
+            {
+                "face": {
+                    "visible": true/false,
+                    "features": "Description of facial features"
+                },
+                "body": {
+                    "build": "Description of body type",
+                    "height": "Estimated height (tall/medium/short)",
+                    "posture": "Description of posture and stance"
+                },
+                "clothing": {
+                    "upper": "Description of upper body clothing",
+                    "lower": "Description of lower body clothing",
+                    "colors": ["List of dominant colors"]
+                },
+                "hair": {
+                    "style": "Description of hair style",
+                    "color": "Hair color"
+                },
+                "distinctive": ["List of any distinctive features or characteristics"]
+            }
+            """
+            
+            # Use Groq's analyze_image method
+            result = groq_client.analyze_image(image_path, prompt)
+            content = result["choices"][0]["message"]["content"]
+            
+            # Parse the JSON response
+            import re
+            json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find JSON without code blocks
+                json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    json_str = content
+            
+            # Parse the JSON
+            features = json.loads(json_str)
+            return features
+        except Exception as e:
+            logger.error(f"Error extracting person features: {str(e)}")
+            return {
+                "face": {"visible": False, "features": "Unknown"},
+                "body": {"build": "Unknown", "height": "Unknown", "posture": "Unknown"},
+                "clothing": {"upper": "Unknown", "lower": "Unknown", "colors": []},
+                "hair": {"style": "Unknown", "color": "Unknown"},
+                "distinctive": ["Unable to extract features"]
+            }
+    
+    def _calculate_similarity(self, features1, features2):
+        """Calculate cosine similarity between two feature vectors"""
+        # Convert features to numpy arrays if they aren't already
+        if not isinstance(features1, np.ndarray):
+            features1 = np.array(features1)
+        if not isinstance(features2, np.ndarray):
+            features2 = np.array(features2)
+        
+        # Normalize the vectors
+        features1 = features1 / np.linalg.norm(features1)
+        features2 = features2 / np.linalg.norm(features2)
+        
+        # Calculate cosine similarity
+        similarity = np.dot(features1, features2)
+        
+        # Ensure the result is between 0 and 1
+        return max(0, min(1, similarity))
+    
+    async def track_suspect(
+        self, 
+        suspect: Dict[str, Any],
+        videos: List[Dict[str, Any]],
+        timeframe: Optional[Dict[str, str]] = None,
+        confidence_threshold: float = 30.0
+    ) -> List[Dict[str, Any]]:
+        """
+        Track a suspect across multiple videos using Llama 4's long context capabilities
+        
+        Args:
+            suspect: Suspect data including image URL
+            videos: List of video data
+            timeframe: Optional timeframe filter
+            confidence_threshold: Minimum confidence score to consider a match
+        
+        Returns:
+            List of tracking results
+        """
+        logger.info(f"Tracking suspect {suspect['id']} across {len(videos)} videos")
+        
+        tracking_results = []
+        
+        try:
+            # Load suspect image
+            suspect_image_path = f"data/suspects/{suspect['id']}.jpg"
+            if not os.path.exists(suspect_image_path):
+                logger.error(f"Suspect image not found: {suspect_image_path}")
+                return []
+            
+            # Get suspect features using LLaMA
+            suspect_features = await self._get_person_features(suspect_image_path)
+            
+            # Use Llama 4's long context to analyze all videos together
+            # This allows cross-video correlation and pattern recognition
+            all_frames = []
+            video_metadata = {}
+            
+            # Process each video
+            for video in videos:
+                video_id = video['id']
+                logger.info(f"Processing video {video_id} for suspect tracking")
+                
+                # Store video metadata for reference
+                video_metadata[video_id] = {
+                    "location": video.get("location", "Unknown"),
+                    "name": video.get("name", "Unknown"),
+                    "timestamp": video.get("timestamp", "")
+                }
+                
+                # Get analyzed frames for this video
+                frames = mongodb.find_many("frames", {"videoId": video_id})
+                
+                if not frames:
+                    logger.warning(f"No analyzed frames found for video {video_id}")
+                    continue
+                
+                # Apply timeframe filter if provided
+                if timeframe:
+                    filtered_frames = []
+                    start_time = None
+                    end_time = None
+                    
+                    if "start" in timeframe and timeframe["start"]:
+                        start_time = datetime.fromisoformat(timeframe["start"].replace('Z', '+00:00'))
+                    
+                    if "end" in timeframe and timeframe["end"]:
+                        end_time = datetime.fromisoformat(timeframe["end"].replace('Z', '+00:00'))
+                    
+                    for frame in frames:
+                        frame_time = datetime.fromisoformat(frame["timestamp"].replace('Z', '+00:00'))
+                        
+                        if start_time and frame_time < start_time:
+                            continue
+                        
+                        if end_time and frame_time > end_time:
+                            continue
+                        
+                        filtered_frames.append(frame)
+                    
+                    frames = filtered_frames
+                
+                # Skip if no frames after filtering
+                if not frames:
+                    logger.warning(f"No frames match the timeframe filter for video {video_id}")
+                    continue
+                
+                # Add to all frames collection
+                all_frames.extend(frames)
+            
+            # Sort all frames by timestamp for chronological analysis
+            all_frames.sort(key=lambda x: x["timestamp"])
+            
+            # Skip if no frames to analyze
+            if not all_frames:
+                logger.warning("No frames to analyze after filtering")
+                return []
+            
+            # Use Llama 4's long context to analyze all frames together
+            # This allows for better pattern recognition and identity consistency
+            if len(all_frames) > 200:
+                # Process in batches if too many frames
+                logger.info(f"Processing {len(all_frames)} frames in batches")
+                batch_size = 200
+                batches = [all_frames[i:i+batch_size] for i in range(0, len(all_frames), batch_size)]
+                
+                for batch_idx, batch in enumerate(batches):
+                    logger.info(f"Processing batch {batch_idx+1}/{len(batches)}")
+                    batch_results = await self._process_frames_batch(batch, suspect, suspect_features, video_metadata, confidence_threshold)
+                    tracking_results.extend(batch_results)
+            else:
+                # Process all frames together if within context window
+                tracking_results = await self._process_frames_batch(all_frames, suspect, suspect_features, video_metadata, confidence_threshold)
+            
+            # Use Llama 4 to verify identity consistency across appearances
+            tracking_results = await self._verify_identity_consistency(tracking_results, suspect)
+            
+            # Detect clothing changes and carrying items
+            tracking_results = await self._detect_appearance_changes(tracking_results)
+            
+            # Analyze suspicious behavior patterns
+            tracking_results = await self._analyze_behavior_patterns(tracking_results)
+            
+        except Exception as e:
+            logger.error(f"Error tracking suspect: {str(e)}")
+        
+        # Sort results by timestamp
+        tracking_results.sort(key=lambda x: x["timestamp"])
+        
+        logger.info(f"Found {len(tracking_results)} appearances of suspect {suspect['id']}")
+        
+        return tracking_results
+    
+    async def _process_frames_batch(self, frames_batch, suspect, suspect_features, video_metadata, confidence_threshold):
+        """Process a batch of frames to identify the suspect"""
+        batch_results = []
+        
+        for frame in frames_batch:
+            video_id = frame["videoId"]
+            frame_path = frame.get("path")
+            
+            if not frame_path or not os.path.exists(frame_path):
+                logger.warning(f"Frame path not found: {frame_path}")
+                continue
+            
+            # Get persons in this frame
+            persons = frame.get("persons", [])
+            
+            # If no persons detected in the frame analysis, try to detect them now
+            if not persons:
+                logger.info(f"No persons detected in frame {frame['id']}, attempting detection now")
+                try:
+                    # Use Groq to detect persons in the frame
+                    frame_analysis = groq_client.process_video_frame(frame_path)
+                    persons = frame_analysis.get("persons", [])
+                    
+                    # Update the frame with the detected persons
+                    frame["persons"] = persons
+                    
+                    # Save the updated frame to database if available
+                    mongodb.update_one("frames", {"id": frame["id"]}, {"$set": {"persons": persons}})
+                    
+                    logger.info(f"Detected {len(persons)} persons in frame {frame['id']} during suspect tracking")
+                except Exception as e:
+                    logger.error(f"Error detecting persons in frame {frame['id']}: {str(e)}")
+            
+            # Skip if still no persons detected
+            if not persons:
+                logger.info(f"No persons detected in frame {frame['id']}, skipping")
+                continue
+        
+            # Also try to compare the whole frame with the suspect
+            suspect_image_path = f"data/suspects/{suspect['id']}.jpg"
+            try:
+                # Compare whole frame with suspect
+                whole_frame_comparison_prompt = """
+                Compare these two images carefully. The first image is of a suspect we're trying to track.
+                The second image is a CCTV frame that may contain the suspect somewhere in the image.
+                
+                IMPORTANT: The suspect might be anywhere in the CCTV frame, possibly at a distance or partially visible.
+                Look at ALL people in the second image and determine if ANY of them could possibly be the suspect from the first image.
+                
+                Consider ANY similarities in:
+                1. Any visible facial features (even if partially visible or at a distance)
+                2. Body type, build, and posture
+                3. Clothing style, color, and accessories
+                4. Hair style and color (if visible)
+                5. General appearance and demeanor
+                
+                Be EXTREMELY lenient in your assessment - if there's ANY possibility that the suspect appears ANYWHERE in the CCTV frame, consider it a potential match.
+                
+                Provide a confidence score (0-100) indicating how likely the suspect appears somewhere in the CCTV frame.
+                Even with minimal visible evidence, if there's any possibility, assign at least a moderate score (30-50).
+                
+                Format your response as a JSON object:
+                {
+                    "match": true/false,
+                    "confidence": 85,
+                    "reasoning": "Detailed explanation of why you think the suspect might appear in the CCTV frame",
+                    "location": "Description of where in the frame the suspect appears to be"
+                }
+                """
+                
+                # Use Groq for whole frame comparison
+                whole_frame_comparison = groq_client.compare_images(
+                    suspect_image_path,
+                    frame_path,
+                    whole_frame_comparison_prompt,
+                    use_urls=False
+                )
+                
+                # Extract comparison data
+                try:
+                    content = whole_frame_comparison["choices"][0]["message"]["content"]
+                    
+                    # Find JSON in the response
+                    import re
+                    json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                    else:
+                        # Try to find JSON without code blocks
+                        json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+                        if json_match:
+                            json_str = json_match.group(1)
+                        else:
+                            json_str = content
+                    
+                    # Parse the JSON
+                    whole_frame_data = json.loads(json_str)
+                    
+                    # If whole frame match is found with good confidence, add it to results
+                    if whole_frame_data.get("match", False) and whole_frame_data.get("confidence", 0) >= confidence_threshold:
+                        result = {
+                            "id": f"track-{uuid.uuid4()}",
+                            "suspectId": suspect["id"],
+                            "videoId": video_id,
+                            "frameId": frame["id"],
+                            "timestamp": frame["timestamp"],
+                            "location": video_metadata[video_id]["location"],
+                            "confidence": whole_frame_data.get("confidence", 0),
+                            "reasoning": whole_frame_data.get("reasoning", ""),
+                            "position": whole_frame_data.get("location", ""),
+                            "wholeFrameMatch": True,
+                            "thumbnailUrl": f"/frames/{video_id}/{frame['id']}.jpg"
+                        }
+                        
+                        batch_results.append(result)
+                        logger.info(f"Found suspect match in whole frame {frame['id']} with confidence {whole_frame_data.get('confidence', 0)}")
+                except Exception as e:
+                    logger.error(f"Error parsing whole frame comparison result: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error comparing suspect with whole frame: {str(e)}")
+            
+            # Compare each detected person with the suspect using Groq
+            for person in persons:
+                try:
+                    # Extract the person from the frame using bounding box
+                    bbox = person.get("bbox") or person.get("boundingBox")
+                    use_whole_frame = False
+                    
+                    # Read the frame image
+                    frame_img = cv2.imread(frame_path)
+                    if frame_img is None:
+                        continue
+                    
+                    height, width = frame_img.shape[:2]
+                    
+                    # Check if we need to use the whole frame
+                    if not bbox or len(bbox) != 4:
+                        logger.info(f"No valid bbox found, using whole frame for comparison")
+                        use_whole_frame = True
+                        person_img = frame_img
+                    else:
+                        # Ensure bbox is within frame boundaries
+                        x1 = max(0, int(bbox[0]))
+                        y1 = max(0, int(bbox[1]))
+                        x2 = min(width, int(bbox[2]))
+                        y2 = min(height, int(bbox[3]))
+                        
+                        # Skip if invalid bbox
+                        if x1 >= x2 or y1 >= y2:
+                            logger.info(f"Invalid bbox {bbox}, using whole frame for comparison")
+                            use_whole_frame = True
+                            person_img = frame_img
+                        else:
+                            # Calculate bbox area
+                            bbox_area = (x2 - x1) * (y2 - y1)
+                            frame_area = width * height
+                            
+                            # If bbox is too small (less than 5% of frame), use whole frame
+                            if bbox_area < 0.05 * frame_area:
+                                logger.info(f"Bbox too small ({bbox_area} px), using whole frame for comparison")
+                                use_whole_frame = True
+                                person_img = frame_img
+                            else:
+                                # Expand the bbox by 20% in each direction to include more context
+                                bbox_width = x2 - x1
+                                bbox_height = y2 - y1
+                                
+                                x1 = max(0, int(x1 - bbox_width * 0.2))
+                                y1 = max(0, int(y1 - bbox_height * 0.2))
+                                x2 = min(width, int(x2 + bbox_width * 0.2))
+                                y2 = min(height, int(y2 + bbox_height * 0.2))
+                                
+                                # Crop person from frame with expanded bbox
+                                person_img = frame_img[y1:y2, x1:x2]
+                    
+                    # Skip if crop resulted in empty image
+                    if person_img.size == 0:
+                        logger.info(f"Empty person image, skipping")
+                        continue
+                    
+                    # Save cropped image to temporary file
+                    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                        person_img_path = temp_file.name
+                        cv2.imwrite(person_img_path, person_img)
+                    
+                    # Prepare comparison prompt based on whether we're using whole frame or cropped person
+                    if use_whole_frame:
+                        comparison_prompt = """
+                        Compare these two images carefully. The first image is of a suspect we're trying to track.
+                        The second image is a CCTV frame that may contain the suspect somewhere in the image.
+                        
+                        IMPORTANT: The suspect might be anywhere in the CCTV frame, possibly at a distance or partially visible.
+                        Look at ALL people in the second image and determine if ANY of them could possibly be the suspect from the first image.
+                        
+                        Consider ANY similarities in:
+                        1. Any visible facial features (even if partially visible or at a distance)
+                        2. Body type, build, and posture
+                        3. Clothing style, color, and accessories
+                        4. Hair style and color (if visible)
+                        5. General appearance and demeanor
+                        
+                        Be EXTREMELY lenient in your assessment - if there's ANY possibility that the suspect appears ANYWHERE in the CCTV frame, consider it a potential match.
+                        
+                        Provide a confidence score (0-100) indicating how likely the suspect appears somewhere in the CCTV frame.
+                        Even with minimal visible evidence, if there's any possibility, assign at least a moderate score (30-50).
+                        
+                        Format your response as a JSON object:
+                        {
+                            "match": true/false,
+                            "confidence": 85,
+                            "reasoning": "Detailed explanation of why you think the suspect might appear in the CCTV frame"
+                        }
+                        """
+                    else:
+                        comparison_prompt = """
+                        Compare these two images carefully. The first image is of a suspect we're trying to track.
+                        The second image is from a CCTV camera and shows a person.
+                        
+                        Even if the images are partial, blurry, or the person is not fully visible, try to determine if they could possibly be the same person.
+                        Consider ANY similarities in:
+                        1. Any visible facial features (even if partially visible)
+                        2. Body type, build, and posture
+                        3. Clothing style, color, and accessories
+                        4. Hair style and color (if visible)
+                        5. General appearance and demeanor
+                        
+                        Be EXTREMELY lenient in your assessment - if there's ANY reasonable possibility they could be the same person, consider it a potential match.
+                        
+                        Provide a confidence score (0-100) indicating how likely these are the same person.
+                        Even with minimal visible evidence, if there's any possibility, assign at least a moderate score (30-50).
+                        
+                        Format your response as a JSON object:
+                        {
+                            "match": true/false,
+                            "confidence": 85,
+                            "reasoning": "Detailed explanation of why you think they might match or don't match"
+                        }
+                        """
+                    
+                    
+                    # Use Groq for comparison
+                    comparison_result = groq_client.compare_images(
+                        suspect_image_path,
+                        person_img_path,
+                        comparison_prompt,
+                        use_urls=False
+                    )
+                    
+                    # Extract comparison data
+                    try:
+                        content = comparison_result["choices"][0]["message"]["content"]
+                        
+                        # Find JSON in the response
+                        import re
+                        json_match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+                        if json_match:
+                            json_str = json_match.group(1)
+                        else:
+                            # Try to find JSON without code blocks
+                            json_match = re.search(r'(\{.*\})', content, re.DOTALL)
+                            if json_match:
+                                json_str = json_match.group(1)
+                            else:
+                                json_str = content
+                        
+                        # Parse the JSON
+                        comparison_data = json.loads(json_str)
+                        
+                        # Check if match meets confidence threshold
+                        if comparison_data.get("match", False) and comparison_data.get("confidence", 0) >= confidence_threshold:
+                            # Create tracking result
+                            result = {
+                                "id": f"track-{uuid.uuid4()}",
+                                "suspectId": suspect["id"],
+                                "videoId": video_id,
+                                "frameId": frame["id"],
+                                "timestamp": frame["timestamp"],
+                                "location": video_metadata[video_id]["location"],
+                                "confidence": comparison_data.get("confidence", 0),
+                                "reasoning": comparison_data.get("reasoning", ""),
+                                "bbox": bbox,
+                                "description": person.get("description", ""),
+                                "position": person.get("position", ""),
+                                "carrying": person.get("carrying", []),
+                                "thumbnailUrl": f"/frames/{video_id}/{frame['id']}.jpg"
+                            }
+                            
+                            batch_results.append(result)
+                            logger.info(f"Found suspect match in video {video_id} with confidence {comparison_data.get('confidence', 0)}")
+                    
+                    except (json.JSONDecodeError, KeyError, IndexError) as e:
+                        logger.error(f"Error parsing comparison result: {str(e)}")
+                    
+                    # Clean up temporary file
+                    try:
+                        os.unlink(person_img_path)
+                    except:
+                        pass
+                        
+                except Exception as e:
+                    logger.error(f"Error comparing suspect with person: {str(e)}")
+        
+        return batch_results
+    
+    async def _verify_identity_consistency(self, tracking_results, suspect):
+        """Use Llama 4 to verify identity consistency across appearances"""
+        if not tracking_results or len(tracking_results) <= 1:
+            return tracking_results
+        
+        try:
+            # Prepare data for Llama 4
+            suspect_name = suspect.get("name", "Unknown Suspect")
+            suspect_desc = suspect.get("description", "")
+            
+            # Extract frame paths for all appearances
+            appearance_data = []
+            for result in tracking_results:
+                video_id = result["videoId"]
+                frame_id = result["frameId"]
+                timestamp = result["timestamp"]
+                location = result["location"]
+                confidence = result["confidence"]
+                
+                frame_path = f"data/videos/frames/{video_id}/{frame_id}.jpg"
+                if os.path.exists(frame_path):
+                    appearance_data.append({
+                        "frame_path": frame_path,
+                        "timestamp": timestamp,
+                        "location": location,
+                        "confidence": confidence,
+                        "result_id": result["id"]
+                    })
+            
+            # Skip if no valid appearances
+            if not appearance_data:
+                return tracking_results
+            
+            # In a real implementation, we would use Llama 4's multimodal capabilities
+            # to analyze all appearances together and verify identity consistency
+            
+            # For now, we'll just return the original results
+            # In a real implementation, we would filter out false positives
+            
+            return tracking_results
+            
+        except Exception as e:
+            logger.error(f"Error verifying identity consistency: {str(e)}")
+            return tracking_results
+    
+    async def _detect_appearance_changes(self, tracking_results):
+        """Detect clothing changes and items being carried"""
+        if not tracking_results or len(tracking_results) <= 1:
+            return tracking_results
+        
+        try:
+            # Group appearances by time proximity
+            # This helps identify when the suspect might have changed clothes
+            sorted_results = sorted(tracking_results, key=lambda x: x["timestamp"])
+            
+            current_group = [sorted_results[0]]
+            appearance_groups = [current_group]
+            
+            for i in range(1, len(sorted_results)):
+                current = sorted_results[i]
+                previous = sorted_results[i-1]
+                
+                current_time = datetime.fromisoformat(current["timestamp"].replace('Z', '+00:00'))
+                previous_time = datetime.fromisoformat(previous["timestamp"].replace('Z', '+00:00'))
+                
+                time_diff = (current_time - previous_time).total_seconds() / 60  # in minutes
+                
+                # If more than 30 minutes have passed, start a new group
+                if time_diff > 30:
+                    current_group = [current]
+                    appearance_groups.append(current_group)
+                else:
+                    current_group.append(current)
+            
+            # In a real implementation, we would use Llama 4's multimodal capabilities
+            # to analyze appearance changes within and between groups
+            
+            # For now, we'll just return the original results
+            # In a real implementation, we would add appearance change annotations
+            
+            return tracking_results
+            
+        except Exception as e:
+            logger.error(f"Error detecting appearance changes: {str(e)}")
+            return tracking_results
+    
+    async def _analyze_behavior_patterns(self, tracking_results):
+        """Analyze suspicious behavior patterns"""
+        if not tracking_results or len(tracking_results) <= 1:
+            return tracking_results
+        
+        try:
+            # Analyze movement patterns
+            # Look for suspicious patterns like loitering, repeated visits, etc.
+            location_visits = {}
+            
+            for result in tracking_results:
+                location = result["location"]
+                timestamp = result["timestamp"]
+                
+                if location not in location_visits:
+                    location_visits[location] = []
+                
+                location_visits[location].append(timestamp)
+            
+            # Identify locations with multiple visits
+            repeated_locations = {loc: visits for loc, visits in location_visits.items() if len(visits) > 1}
+            
+            # Add behavior annotations to results
+            for result in tracking_results:
+                location = result["location"]
+                
+                if location in repeated_locations:
+                    if "behaviorNotes" not in result:
+                        result["behaviorNotes"] = []
+                    
+                    result["behaviorNotes"].append(f"Repeated visits to {location}")
+            
+            return tracking_results
+            
+        except Exception as e:
+            logger.error(f"Error analyzing behavior patterns: {str(e)}")
+            return tracking_results
+    
+    async def generate_timeline(self, tracking_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Generate a detailed timeline and narrative of suspect movements across multiple videos
+        using Llama 4's reasoning capabilities
+        
+        Args:
+            tracking_results: List of tracking results
+            
+        Returns:
+            Timeline data with detailed narrative
+        """
+        logger.info(f"Generating timeline from {len(tracking_results)} tracking results")
+        
+        if not tracking_results:
+            return {
+                "events": [],
+                "duration": 0,
+                "locations": [],
+                "firstSeen": None,
+                "lastSeen": None,
+                "narrative": "No suspect appearances detected.",
+                "activitySummary": "",
+                "visualTimeline": []
+            }
+        
+        # Sort tracking results by timestamp
+        sorted_results = sorted(tracking_results, key=lambda x: x["timestamp"])
+        
+        # Extract unique locations
+        locations = list(set(result["location"] for result in tracking_results))
+        
+        # Calculate first and last seen times
+        first_seen = sorted_results[0]["timestamp"]
+        last_seen = sorted_results[-1]["timestamp"]
+        
+        # Calculate duration
+        try:
+            first_dt = datetime.fromisoformat(first_seen.replace('Z', '+00:00'))
+            last_dt = datetime.fromisoformat(last_seen.replace('Z', '+00:00'))
+            duration_seconds = (last_dt - first_dt).total_seconds()
+            duration_minutes = duration_seconds / 60
+        except Exception as e:
+            logger.error(f"Error calculating duration: {str(e)}")
+            duration_minutes = 0
+            first_dt = datetime.now()
+            last_dt = datetime.now()
+        
+        # Generate enriched events with activity recognition
+        events = []
+        for i, result in enumerate(sorted_results):
+            try:
+                # Determine activity based on description, position, and reasoning
+                activity = self._determine_activity(result)
+                
+                # Determine if this is a new location compared to previous event
+                location_change = False
+                if i > 0 and result["location"] != sorted_results[i-1]["location"]:
+                    location_change = True
+                
+                # Calculate time since previous event
+                time_since_previous = None
+                if i > 0:
+                    try:
+                        current_dt = datetime.fromisoformat(result["timestamp"].replace('Z', '+00:00'))
+                        prev_dt = datetime.fromisoformat(sorted_results[i-1]["timestamp"].replace('Z', '+00:00'))
+                        time_diff = (current_dt - prev_dt).total_seconds()
+                        time_since_previous = time_diff
+                    except Exception as e:
+                        logger.error(f"Error calculating time difference: {str(e)}")
+                
+                # Identify any interactions with other people
+                interactions = self._identify_interactions(result)
+                
+                # Create enriched event
+                event = {
+                    "id": f"event-{uuid.uuid4()}",
+                    "timestamp": result["timestamp"],
+                    "location": result["location"],
+                    "confidence": result["confidence"],
+                    "frameId": result["frameId"],
+                    "videoId": result["videoId"],
+                    "thumbnailUrl": result["thumbnailUrl"],
+                    "activity": activity,
+                    "locationChange": location_change,
+                    "timeSincePrevious": time_since_previous,
+                    "interactions": interactions,
+                    "description": result.get("description", ""),
+                    "position": result.get("position", ""),
+                    "reasoning": result.get("reasoning", ""),
+                    "carrying": result.get("carrying", [])
+                }
+                events.append(event)
+            except Exception as e:
+                logger.error(f"Error processing tracking result for timeline: {str(e)}")
+        
+        # Generate visual timeline data for frontend
+        visual_timeline = self._generate_visual_timeline(events, locations)
+        
+        # Generate a detailed narrative of the suspect's movements
+        narrative = await self._generate_narrative(events, locations, first_dt, last_dt)
+        
+        # Generate activity summary
+        activity_summary = self._generate_activity_summary(events)
+        
+        timeline = {
+            "events": events,
+            "duration": round(duration_minutes, 1),
+            "locations": locations,
+            "firstSeen": first_seen,
+            "lastSeen": last_seen,
+            "narrative": narrative,
+            "activitySummary": activity_summary,
+            "visualTimeline": visual_timeline
+        }
+        
+        logger.info(f"Generated timeline with {len(events)} events and detailed narrative")
+        return timeline
+        
+    def _determine_activity(self, tracking_result: Dict[str, Any]) -> str:
+        """
+        Determine the suspect's activity based on tracking result data
+        """
+        # Default activity
+        activity = "Present in scene"
+        
+        # Extract relevant information
+        description = tracking_result.get("description", "")
+        position = tracking_result.get("position", "")
+        reasoning = tracking_result.get("reasoning", "")
+        carrying = tracking_result.get("carrying", [])
+        
+        # Check for common activities in the description or position
+        activity_keywords = {
+            "walking": "Walking",
+            "standing": "Standing",
+            "sitting": "Sitting",
+            "running": "Running",
+            "talking": "Talking",
+            "looking": "Observing",
+            "carrying": "Carrying items",
+            "holding": "Holding items",
+            "eating": "Eating",
+            "drinking": "Drinking",
+            "entering": "Entering",
+            "exiting": "Exiting",
+            "approaching": "Approaching",
+            "leaving": "Leaving",
+            "bending": "Bending over",
+            "leaning": "Leaning",
+            "picking": "Picking up items",
+            "placing": "Placing items",
+            "interacting": "Interacting"
+        }
+        
+        # Check all text fields for activity keywords
+        all_text = f"{description} {position} {reasoning}".lower()
+        
+        for keyword, activity_name in activity_keywords.items():
+            if keyword in all_text:
+                activity = activity_name
+                break
+        
+        # Add carrying information if available
+        if carrying and len(carrying) > 0:
+            items = ", ".join(carrying)
+            activity += f" with {items}"
+        
+        return activity
+    
+    def _identify_interactions(self, tracking_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Identify interactions with other people based on tracking result data
+        """
+        interactions = []
+        
+        # Extract relevant information
+        description = tracking_result.get("description", "")
+        position = tracking_result.get("position", "")
+        reasoning = tracking_result.get("reasoning", "")
+        
+        # Check for interaction keywords
+        interaction_keywords = ["talking to", "speaking with", "interacting with", "meeting", "accompanied by", "with another person", "with a person", "with people", "with someone"]
+        
+        all_text = f"{description} {position} {reasoning}".lower()
+        
+        for keyword in interaction_keywords:
+            if keyword in all_text:
+                # Simple interaction detection for now
+                interactions.append({
+                    "type": "conversation",
+                    "description": "Possible interaction with another person"
+                })
+                break
+        
+        return interactions
+    
+    def _generate_visual_timeline(self, events: List[Dict[str, Any]], locations: List[str]) -> List[Dict[str, Any]]:
+        """
+        Generate visual timeline data for frontend visualization
+        """
+        visual_timeline = []
+        
+        # Create a timeline entry for each event
+        for event in events:
+            timestamp = event["timestamp"]
+            try:
+                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                formatted_time = dt.strftime("%H:%M:%S")
+            except Exception:
+                formatted_time = timestamp
+                
+            visual_entry = {
+                "id": event["id"],
+                "time": formatted_time,
+                "location": event["location"],
+                "activity": event["activity"],
+                "thumbnailUrl": event["thumbnailUrl"],
+                "confidence": event["confidence"],
+                "isLocationChange": event["locationChange"],
+                "description": f"{event['activity']} at {event['location']}"
+            }
+            
+            visual_timeline.append(visual_entry)
+        
+        return visual_timeline
+    
+    async def _generate_narrative(self, events: List[Dict[str, Any]], locations: List[str], first_dt: datetime, last_dt: datetime) -> str:
+        """
+        Generate a detailed narrative of the suspect's movements using LLaMA or Groq
+        """
+        # If no events, return empty narrative
+        if not events:
+            return "No suspect appearances detected."
+        
+        # Prepare the events data for the narrative generation
+        events_text = []
+        for i, event in enumerate(events):
+            try:
+                dt = datetime.fromisoformat(event["timestamp"].replace('Z', '+00:00'))
+                formatted_time = dt.strftime("%H:%M:%S")
+            except Exception:
+                formatted_time = event["timestamp"]
+                
+            event_text = f"Event {i+1}: At {formatted_time}, location: {event['location']}, activity: {event['activity']}"
+            
+            # Add additional details if available
+            if event.get("description"):
+                event_text += f", description: {event['description']}"
+            if event.get("position"):
+                event_text += f", position: {event['position']}"
+            if event.get("carrying") and len(event['carrying']) > 0:
+                items = ", ".join(event['carrying'])
+                event_text += f", carrying: {items}"
+            if event.get("interactions") and len(event['interactions']) > 0:
+                event_text += f", possible interaction with others"
+                
+            events_text.append(event_text)
+            
+        events_description = "\n".join(events_text)
+        
+        # Format time range
+        start_time = first_dt.strftime("%H:%M:%S")
+        end_time = last_dt.strftime("%H:%M:%S")
+        date = first_dt.strftime("%Y-%m-%d")
+        
+        # Locations summary
+        locations_text = ", ".join(locations)
+        
+        # Prepare the prompt for narrative generation
+        prompt = f"""
+        Based on the following chronological events from CCTV footage of a suspect on {date} between {start_time} and {end_time}, 
+        create a detailed investigative narrative that describes the suspect's movements, activities, and behaviors.
+        
+        The suspect was tracked across these locations: {locations_text}
+        
+        Chronological events:
+        {events_description}
+        
+        Write a detailed, professional narrative suitable for a police investigation report. 
+        Focus on creating a clear chronological story of the suspect's movements and activities.
+        Include specific times, locations, and observed behaviors. 
+        Highlight any notable patterns, interactions with others, or suspicious activities.
+        The narrative should be factual, objective, and detailed, avoiding speculation beyond what's directly observed.
+        """
+        
+        try:
+            # Try to use Groq for narrative generation (more reliable)
+            response = groq_client.generate_text(prompt)
+            narrative = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            if not narrative:
+                # Fallback to simple narrative
+                narrative = self._generate_simple_narrative(events, locations, first_dt, last_dt)
+        except Exception as e:
+            logger.error(f"Error generating narrative with Groq: {str(e)}")
+            # Fallback to simple narrative
+            narrative = self._generate_simple_narrative(events, locations, first_dt, last_dt)
+            
+        return narrative
+    
+    def _generate_simple_narrative(self, events: List[Dict[str, Any]], locations: List[str], first_dt: datetime, last_dt: datetime) -> str:
+        """
+        Generate a simple narrative when AI-generated narrative fails
+        """
+        # Format times
+        start_time = first_dt.strftime("%H:%M:%S")
+        end_time = last_dt.strftime("%H:%M:%S")
+        date = first_dt.strftime("%Y-%m-%d")
+        
+        # Generate a simple narrative
+        narrative = f"On {date}, the suspect was tracked from {start_time} to {end_time} across {len(locations)} location(s): {', '.join(locations)}. "
+        
+        # Add key events
+        narrative += f"The suspect was first seen at {events[0]['location']} engaging in {events[0]['activity']}. "
+        
+        # Add location changes
+        location_changes = [event for event in events if event.get("locationChange")]
+        if location_changes:
+            narrative += "During surveillance, the suspect moved between multiple locations: "
+            for change in location_changes:
+                try:
+                    dt = datetime.fromisoformat(change["timestamp"].replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%H:%M:%S")
+                except Exception:
+                    formatted_time = change["timestamp"]
+                narrative += f"at {formatted_time} moved to {change['location']} and was {change['activity']}; "
+        
+        # Add final observation
+        narrative += f"The suspect was last observed at {events[-1]['location']} at {end_time} {events[-1]['activity']}."
+        
+        return narrative
+    
+    def _generate_activity_summary(self, events: List[Dict[str, Any]]) -> str:
+        """
+        Generate a summary of the suspect's activities
+        """
+        # Count activities
+        activity_counts = {}
+        for event in events:
+            activity = event.get("activity", "Unknown")
+            activity_counts[activity] = activity_counts.get(activity, 0) + 1
+        
+        # Generate summary
+        activities = [f"{count} instances of {activity}" for activity, count in activity_counts.items()]
+        summary = "Activity summary: " + "; ".join(activities)
+        
+        return summary
+        
+    async def build_knowledge_graph(self, tracking_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Build a knowledge graph from tracking results
+        
+        Args:
+            tracking_results: List of suspect tracking results
+        
+        Returns:
+            Knowledge graph data
+        """
+        logger.info(f"Building knowledge graph from {len(tracking_results)} tracking results")
+        
+        nodes = []
+        edges = []
+        
+        # Track unique nodes and edges
+        node_ids = set()
+        edge_ids = set()
+        
+        # Create suspect node
+        if tracking_results:
+            suspect_id = tracking_results[0]["suspectId"]
+            suspect_node = {
+                "id": suspect_id,
+                "type": "person",
+                "label": "Suspect",
+                "size": 30,
+                "color": "#ff0000"
+            }
+            
+            nodes.append(suspect_node)
+            node_ids.add(suspect_id)
+        
+        # Process each tracking result
+        for result in tracking_results:
+            try:
+                # Extract data
+                suspect_id = result["suspectId"]
+                location = result["location"]
+                timestamp = result["timestamp"]
+                interactions = result.get("interactions", [])
+                
+                # Create location node if it doesn't exist
+                location_id = f"location-{location.replace(' ', '_')}"
+                if location_id not in node_ids:
+                    location_node = {
+                        "id": location_id,
+                        "type": "location",
+                        "label": location,
+                        "size": 20,
+                        "color": "#0000ff"
+                    }
+                    
+                    nodes.append(location_node)
+                    node_ids.add(location_id)
+                
+                # Create edge between suspect and location
+                edge_id = f"edge-{suspect_id}-{location_id}-{timestamp}"
+                if edge_id not in edge_ids:
+                    edge = {
+                        "id": edge_id,
+                        "source": suspect_id,
+                        "target": location_id,
+                        "label": "visited",
+                        "timestamp": timestamp
+                    }
+                    edges.append(edge)
+                    edge_ids.add(edge_id)
+                
+                # Add object nodes and edges based on carrying
+                if result.get("carrying"):
+                    for item in result["carrying"]:
+                        object_id = f"object-{item.replace(' ', '_')}"
+                        if object_id not in node_ids:
+                            object_node = {
+                                "id": object_id,
+                                "type": "object",
+                                "label": item.title(),
+                                "size": 15,
+                                "color": "#00ff00"
+                            }
+                            nodes.append(object_node)
+                            node_ids.add(object_id)
+                        
+                        # Create edge between suspect and object
+                        edge_id = f"edge-{suspect_id}-{object_id}"
+                        if edge_id not in edge_ids:
+                            edge = {
+                                "id": edge_id,
+                                "source": suspect_id,
+                                "target": object_id,
+                                "label": "carried",
+                                "timestamp": timestamp
+                            }
+                            edges.append(edge)
+                            edge_ids.add(edge_id)
+                
+                # Add interaction nodes and edges
+                for interaction in interactions:
+                    person_id = f"person-{interaction.replace(' ', '_')}"
+                    if person_id not in node_ids:
+                        person_node = {
+                            "id": person_id,
+                            "type": "person",
+                            "label": interaction,
+                            "size": 15,
+                            "color": "#ff00ff"
+                        }
+                        nodes.append(person_node)
+                        node_ids.add(person_id)
+                    
+                    # Create edge between suspect and person
+                    edge_id = f"edge-{suspect_id}-{person_id}-{timestamp}"
+                    if edge_id not in edge_ids:
+                        edge = {
+                            "id": edge_id,
+                            "source": suspect_id,
+                            "target": person_id,
+                            "label": "interacted",
+                            "timestamp": timestamp
+                        }
+                        edges.append(edge)
+                        edge_ids.add(edge_id)
+                
+            except Exception as e:
+                logger.error(f"Error processing tracking result for graph: {str(e)}")
+        
+        # Return graph data
+        graph_data = {
+            "nodes": nodes,
+            "edges": edges
+        }
+        
+        logger.info(f"Built knowledge graph with {len(nodes)} nodes and {len(edges)} edges")
+        
+        return graph_data
+    
+    async def generate_summary(self, timeline_events: List[Dict[str, Any]], graph: Optional[Dict[str, Any]] = None, environment_context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Generate a natural language summary of the analysis using Llama 4's long context capabilities
+        
+        Args:
+            timeline_events: List of timeline events
+            graph: Knowledge graph data (optional)
+            environment_context: Environmental context information (optional)
+        
+        Returns:
+            Summary text
+        """
+        if not timeline_events:
+            return "No suspect appearances were detected in the provided videos."
+        
+        try:
+            # Use LLaMA to generate a comprehensive summary
+            # Prepare prompt for LLaMA
+            prompt = f"""
+            Generate a comprehensive summary of the following timeline of events tracking a suspect across multiple CCTV cameras.
+            Focus on key movements, patterns, and suspicious behaviors.
+            Include information about locations visited, items carried, and interactions with others.
+        Args:
+            timeline_events: List of timeline events
+            tracking_results: List of tracking results with detailed information
+            
+        Returns:
+            Enhanced narrative text
+        """
+        if not timeline_events:
+            return "No suspect appearances were detected in the provided videos."
+        
+        try:
+            # Extract locations, timestamps, and other important information
+            locations = set()
+            for event in timeline_events:
+                if "location" in event:
+                    locations.add(event["location"])
+            
+            # Get first and last timestamps
+            first_event = timeline_events[0]
+            last_event = timeline_events[-1]
+            
+            first_time = datetime.fromisoformat(first_event["timestamp"].replace('Z', '+00:00'))
+            last_time = datetime.fromisoformat(last_event["timestamp"].replace('Z', '+00:00'))
+            
+            # Prepare prompt for LLaMA
+            prompt = f"""
+            Generate a detailed investigative narrative of a suspect's movements across multiple CCTV cameras.
+            This should be written in the style of a professional investigative report, with precise timestamps, locations, and descriptions of activities.
+            
+            Use the following timeline events and tracking results to create a comprehensive narrative:
+            
+            TIMELINE EVENTS:
+            {json.dumps(timeline_events, indent=2)}
+            
+            TRACKING RESULTS:
+            {json.dumps(tracking_results[:5], indent=2)}  # Include a sample of tracking results to avoid token limits
+            
+            The narrative should include:
+            1. Precise timestamps for each movement and activity
+            2. Detailed descriptions of the suspect's appearance and any changes
+            3. Specific locations visited and the path taken between them
+            4. Any interactions with other people or objects
+            5. Analysis of potentially suspicious behaviors or patterns
+            6. Chronological flow that an investigator could follow easily
+            
+            The narrative should be at least 4-5 paragraphs long and include all significant events.
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+            
+            # Use Llama 4's long context window to generate the narrative
+            response = llama_client.chat_completion(messages)
+            narrative = response["choices"][0]["message"]["content"]
+            
+            return narrative
+            
+        except Exception as e:
+            logger.error(f"Error generating enhanced narrative: {str(e)}")
+            # Fall back to simple narrative
+            return await self._generate_simple_narrative(timeline_events, list(locations), first_time, last_time)
+    
+    async def generate_activity_summary(self, timeline_events: List[Dict[str, Any]], tracking_results: List[Dict[str, Any]]) -> str:
+        """
+        Generate a concise summary of the suspect's activities
+        
+        Args:
+            timeline_events: List of timeline events
+            tracking_results: List of tracking results
+            
+        Returns:
+            Activity summary text
+        """
+        if not timeline_events:
+            return "No activities detected."
+        
+        try:
+            # Extract key information
+            locations = set()
+            for event in timeline_events:
+                if "location" in event:
+                    locations.add(event["location"])
+            
+            # Get first and last timestamps
+            first_event = timeline_events[0]
+            last_event = timeline_events[-1]
+            
+            first_time = datetime.fromisoformat(first_event["timestamp"].replace('Z', '+00:00'))
+            last_time = datetime.fromisoformat(last_event["timestamp"].replace('Z', '+00:00'))
+            
+            duration_minutes = int((last_time - first_time).total_seconds() / 60)
+            
+            # Extract interactions
+            interactions = []
+            for result in tracking_results:
+                if "interactions" in result and result["interactions"]:
+                    interactions.extend(result["interactions"])
+            
+            # Prepare prompt for LLaMA
+            prompt = f"""
+            Create a concise summary of a suspect's activities based on the following information:
+            
+            - Duration: {duration_minutes} minutes
+            - Locations visited: {', '.join(locations)}
+            - First seen: {first_time.strftime('%I:%M %p')}
+            - Last seen: {last_time.strftime('%I:%M %p')}
+            - Interactions: {', '.join(interactions) if interactions else 'None detected'}
+            
+            The summary should be 2-3 sentences long and highlight the most important aspects of the suspect's movements and activities.
+            Focus on what would be most relevant to an investigator.
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+            
+            # Use LLaMA to generate the summary
+            response = llama_client.chat_completion(messages)
+            summary = response["choices"][0]["message"]["content"]
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error generating activity summary: {str(e)}")
+            return f"Suspect was tracked for {duration_minutes} minutes across {len(locations)} locations from {first_time.strftime('%I:%M %p')} to {last_time.strftime('%I:%M %p')}." 
+    
+    async def generate_visual_timeline(self, timeline_events: List[Dict[str, Any]], graph_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate visual timeline data for frontend visualization
+        
+        Args:
+            timeline_events: List of timeline events
+            graph_data: Knowledge graph data
+            
+        Returns:
+            List of visual timeline events
+        """
+        visual_events = []
+        
+        try:
+            # Map video IDs to location names from graph data
+            location_map = {}
+            for node in graph_data.get("nodes", []):
+                if node.get("type") == "location":
+                    location_map[node.get("id")] = node.get("label")
+            
+            # Process each timeline event
+            for i, event in enumerate(timeline_events):
+                # Get location name from graph data if possible
+                video_id = event.get("videoId")
+                location = location_map.get(video_id, event.get("location", "Unknown Location"))
+                
+                # Format timestamp
+                timestamp = event.get("timestamp", "")
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%I:%M:%S %p")
+                except (ValueError, TypeError):
+                    formatted_time = timestamp
+                
+                # Determine if this is a location change
+                is_location_change = False
+                if i > 0:
+                    prev_video_id = timeline_events[i-1].get("videoId")
+                    prev_location = location_map.get(prev_video_id, timeline_events[i-1].get("location", "Unknown"))
+                    is_location_change = location != prev_location
+                
+                # Create visual event
+                visual_event = {
+                    "id": event.get("id", f"event-{i}"),
+                    "time": formatted_time,
+                    "location": location,
+                    "activity": event.get("description", "Suspect detected"),
+                    "thumbnailUrl": event.get("thumbnailUrl", ""),
+                    "confidence": event.get("confidence", 0),
+                    "isLocationChange": is_location_change,
+                    "description": event.get("description", "")
+                }
+                
+                visual_events.append(visual_event)
+                
+        except Exception as e:
+            logger.error(f"Error generating visual timeline: {str(e)}")
+        
+        return visual_events
+
+# Create a singleton instance
+video_analyzer = VideoAnalyzer()

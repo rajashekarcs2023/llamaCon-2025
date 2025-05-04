@@ -6,6 +6,8 @@ from pymongo.server_api import ServerApi
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import asyncio
+from bson import ObjectId
+from utils.json_encoder import serialize_mongodb_doc
 
 # Load environment variables
 load_dotenv()
@@ -121,12 +123,12 @@ class MongoDBConnector:
             query: Query to find the document
         
         Returns:
-            Found document or None
+            Found document or None with ObjectId serialized to string
         """
         try:
             collection = self.get_collection(collection_name)
             result = collection.find_one(query)
-            return result
+            return serialize_mongodb_doc(result) if result else None
         except Exception as e:
             logger.error(f"Error finding document: {str(e)}")
             return None
@@ -140,12 +142,12 @@ class MongoDBConnector:
             query: Query to find the documents
         
         Returns:
-            List of found documents
+            List of found documents with ObjectId serialized to string
         """
         try:
             collection = self.get_collection(collection_name)
             results = list(collection.find(query))
-            return results
+            return [serialize_mongodb_doc(doc) for doc in results]
         except Exception as e:
             logger.error(f"Error finding documents: {str(e)}")
             return []
@@ -233,12 +235,12 @@ class MongoDBConnector:
             query: Query to find the document
         
         Returns:
-            Found document or None
+            Found document or None with ObjectId serialized to string
         """
         try:
             collection = await self.get_collection_async(collection_name)
             result = await collection.find_one(query)
-            return result
+            return serialize_mongodb_doc(result) if result else None
         except Exception as e:
             logger.error(f"Error finding document (async): {str(e)}")
             return None
@@ -252,13 +254,13 @@ class MongoDBConnector:
             query: Query to find the documents
         
         Returns:
-            List of found documents
+            List of found documents with ObjectId serialized to string
         """
         try:
             collection = await self.get_collection_async(collection_name)
             cursor = collection.find(query)
             results = await cursor.to_list(length=100)
-            return results
+            return [serialize_mongodb_doc(doc) for doc in results]
         except Exception as e:
             logger.error(f"Error finding documents (async): {str(e)}")
             return []

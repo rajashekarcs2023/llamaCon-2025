@@ -2,34 +2,31 @@
 
 import { useState, useEffect } from "react"
 import { useSearchParams } from "next/navigation"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Slider } from "@/components/ui/slider"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Separator } from "@/components/ui/separator"
+import { Slider } from "@/components/ui/slider"
 import { 
-  Play, 
-  Pause, 
-  Volume2, 
-  VolumeX, 
-  Clock, 
-  MapPin, 
-  Video, 
-  AlertCircle, 
-  Info, 
-  ChevronRight,
-  Filter
+  Play, Pause, Volume2, VolumeX, MapPin, RefreshCw, Filter,
+  Clock, Video, AlertCircle, Info, ChevronRight
 } from "lucide-react"
-import type { TimelineEvent, AnalysisResult, Suspect, GraphNode } from "@/types"
+import { 
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import type { Suspect, GraphNode, AnalysisResult, TimelineEvent, EnhancedAnalysisResult, VisualTimelineEvent } from "@/types"
 import { runSuspectTracking } from "@/lib/api-service"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import TimelineNarrative from "@/components/TimelineNarrative"
 import VisualTimeline from "@/components/VisualTimeline"
-
-import type { EnhancedAnalysisResult, VisualTimelineEvent } from "@/types"
 
 export default function TimelinePage() {
   const searchParams = useSearchParams()
@@ -42,6 +39,7 @@ export default function TimelinePage() {
   const [volume, setVolume] = useState(80)
   const [muted, setMuted] = useState(false)
   const [narrationEnabled, setNarrationEnabled] = useState(true)
+  const [viewMode, setViewMode] = useState<'combined' | 'individual'>('combined')
   const [showEnhancedView, setShowEnhancedView] = useState(true)
   const [activeTab, setActiveTab] = useState<'narrative' | 'timeline'>('narrative')
 
@@ -159,15 +157,53 @@ export default function TimelinePage() {
   if (loading) {
     return (
       <div className="container mx-auto p-6">
-        <h1 className="mb-6 text-3xl font-bold tracking-tight">Timeline Analysis</h1>
-        <div className="grid gap-6 md:grid-cols-3">
-          <div className="md:col-span-2">
+        <div className="mb-6 flex items-center justify-between">
+          <h1 className="text-3xl font-bold tracking-tight">Timeline Analysis</h1>
+          
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <Label htmlFor="view-mode">View Mode:</Label>
+              <Select 
+                value={viewMode} 
+                onValueChange={(value) => setViewMode(value as 'combined' | 'individual')}
+              >
+                <SelectTrigger className="w-[180px]">
+                  <SelectValue placeholder="Select view mode" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="combined">Combined Timeline</SelectItem>
+                  <SelectItem value="individual">Individual Videos</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <Button 
+              onClick={() => {
+                // Regenerate timeline
+                setLoading(true);
+                setTimeout(() => {
+                  setLoading(false);
+                }, 1500);
+              }}
+            >
+              <RefreshCw className="mr-2 h-4 w-4" /> Regenerate Timeline
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-[1fr_350px]">
+          <div className="space-y-6">
             <Card>
               <CardHeader>
-                <Skeleton className="h-8 w-48" />
+                <CardTitle>Video Evidence</CardTitle>
               </CardHeader>
-              <CardContent>
-                <Skeleton className="aspect-video w-full" />
+
+              <CardContent className="p-0">
+                {selectedEvent ? (
+                  <div className="aspect-video w-full" />
+                ) : (
+                  <Skeleton className="aspect-video w-full" />
+                )}
                 <div className="mt-4 space-y-4">
                   <Skeleton className="h-4 w-full" />
                   <Skeleton className="h-4 w-3/4" />
@@ -278,7 +314,7 @@ export default function TimelinePage() {
                         <div key={location} className="relative mb-8 flex">
                           {/* Location marker */}
                           <div className="absolute left-[7.5%] -ml-3 mt-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                            {index + 1}
+                            <MapPin className="h-3 w-3" />
                           </div>
                           
                           {/* Location content */}

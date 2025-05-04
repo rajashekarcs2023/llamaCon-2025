@@ -6,11 +6,14 @@ import asyncio
 import json
 import time
 import uuid
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from PIL import Image
 import base64
 import tempfile
+import threading
+from functools import partial
 
 # Import our clients
 from utils.llama_client import llama_client
@@ -36,6 +39,13 @@ class VideoAnalyzer:
         self.use_groq_for_frames = use_groq_for_frames
         self.mongodb_available = True  # Assume MongoDB is available by default
         
+        # Use sequential processing instead of parallel processing
+        # self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self.use_sequential = True  # Flag to indicate sequential processing
+        
+        # Thread lock for GPU operations
+        self.gpu_lock = threading.Lock()
+        
         # Check if MongoDB is available
         try:
             # Try to connect to MongoDB
@@ -44,10 +54,26 @@ class VideoAnalyzer:
         except Exception as e:
             logger.warning(f"MongoDB not available: {str(e)}")
             self.mongodb_available = False
-            
-        logger.info(f"Initializing VideoAnalyzer (using Groq for frames: {use_groq_for_frames}, MongoDB available: {self.mongodb_available})")
+        
+        # Check if GPU is available for OpenCV
+        self.has_gpu = cv2.cuda.getCudaEnabledDeviceCount() > 0
+        
+        logger.info(f"Initializing VideoAnalyzer (using Groq for frames: {use_groq_for_frames}, MongoDB available: {self.mongodb_available}, GPU available: {self.has_gpu})")
     
-    async def process_video(self, video_path: str, video_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def process_video(self, video_path: str, video_id: str, metadata: Dict[str, Any], use_gpu: bool = False) -> Dict[str, Any]:
+        """
+        Process a video file to extract frames and metadata
+        This is a synchronous version of the method for parallel processing
+        
+        Args:
+            video_path: Path to the video file
+            video_id: Unique ID of the video
+            metadata: Video metadata including location and timestamp
+            use_gpu: Whether to use GPU acceleration if available
+        
+        Returns:
+            Dict with video processing results
+        """
         """
         Process a video file to extract frames and metadata
         
@@ -84,10 +110,36 @@ class VideoAnalyzer:
             frame_interval = int(fps)
             frames_extracted = 0
             
-            # Generate thumbnail from first frame
+            # Generate thumbnail from first frame and check orientation
             ret, frame = cap.read()
             if ret:
-                thumbnail_path = f"data/videos/{video_id}_thumb.jpg"
+                # Check video orientation and rotate if needed
+                # This fixes the upside-down video issue
+                # Get video rotation from metadata if available
+                rotation = 0
+                try:
+                    # Try to get rotation from video metadata
+                    # For simplicity, we'll check the height/width ratio
+                    # If height > width * 1.5, it might be a portrait video that needs rotation
+                    if height > width * 1.5:
+                        # Likely a portrait video, check if it needs rotation
+                        # We'll analyze the first frame to detect if it's upside down
+                        # For a more robust solution, you'd use proper metadata analysis
+                        # or computer vision to detect orientation
+                        rotation = 180  # Assume it needs 180 degree rotation if portrait
+                except Exception as e:
+                    logger.warning(f"Could not determine video orientation: {str(e)}")
+                
+                # Rotate frame if needed
+                if rotation != 0:
+                    logger.info(f"Rotating video by {rotation} degrees")
+                    # Get the rotation matrix
+                    M = cv2.getRotationMatrix2D((width/2, height/2), rotation, 1)
+                    # Apply the rotation to the frame
+                    frame = cv2.warpAffine(frame, M, (width, height))
+                
+                # Save thumbnail
+                thumbnail_path = f"data/thumbnails/{video_id}_thumb.jpg"
                 cv2.imwrite(thumbnail_path, frame)
             
             # Extract frames
@@ -130,16 +182,19 @@ class VideoAnalyzer:
                         "timeOffset": current_frame / fps
                     })
                     
+                    if self.mongodb_available:
+                        # Use synchronous version for parallel processing
+                        try:
+                            mongodb.insert_one("frames", frame_metadata[-1])
+                        except Exception as e:
+                            logger.error(f"Error storing frame in database: {str(e)}")
+                    
                     frames_extracted += 1
                 
                 current_frame += 1
             
             # Release video
             cap.release()
-            
-            # Store frame metadata in database
-            for frame in frame_metadata:
-                await mongodb.insert_one_async("frames", frame)
             
             # Update video metadata
             video_update = {
@@ -152,7 +207,11 @@ class VideoAnalyzer:
                 "thumbnailUrl": f"/videos/{video_id}_thumb.jpg"
             }
             
-            await mongodb.update_one_async("videos", {"id": video_id}, {"$set": video_update})
+            # Use synchronous version for parallel processing
+            try:
+                mongodb.update_one("videos", {"id": video_id}, {"$set": video_update})
+            except Exception as e:
+                logger.error(f"Error updating video metadata: {str(e)}")
             
             logger.info(f"Video processing complete: {frames_extracted} frames extracted")
             
@@ -167,7 +226,19 @@ class VideoAnalyzer:
             logger.error(f"Error processing video: {str(e)}")
             return {"error": str(e)}
     
-    async def analyze_frames(self, video_id: str, batch_size: int = 10) -> Dict[str, Any]:
+    def analyze_frames(self, video_id: str, use_gpu: bool = False, batch_size: int = 10) -> Dict[str, Any]:
+        """
+        Analyze extracted frames to detect persons using Llama 4's multimodal capabilities
+        This is a synchronous version of the method for parallel processing
+        
+        Args:
+            video_id: ID of the video to analyze
+            use_gpu: Whether to use GPU acceleration if available
+            batch_size: Number of frames to process in parallel
+        
+        Returns:
+            Dict with analysis results
+        """
         """
         Analyze extracted frames to detect persons using Llama 4's multimodal capabilities
         
@@ -182,21 +253,20 @@ class VideoAnalyzer:
         
         try:
             # Get frames for this video
-            frames = await mongodb.find_async("frames", {"videoId": video_id})
-            frames_list = await frames.to_list(length=None)
+            frames = mongodb.find_many("frames", {"videoId": video_id})
             
-            if not frames_list:
+            if not frames:
                 logger.error(f"No frames found for video: {video_id}")
                 return {"error": "No frames found"}
             
-            logger.info(f"Found {len(frames_list)} frames to analyze")
+            logger.info(f"Found {len(frames)} frames to analyze")
             
             # Process frames in batches
             total_processed = 0
             total_persons_detected = 0
             
             # Create batches
-            batches = [frames_list[i:i+batch_size] for i in range(0, len(frames_list), batch_size)]
+            batches = [frames[i:i+batch_size] for i in range(0, len(frames), batch_size)]
             
             for batch_idx, batch in enumerate(batches):
                 logger.info(f"Processing batch {batch_idx+1}/{len(batches)}")
@@ -204,11 +274,11 @@ class VideoAnalyzer:
                 # Process batch in parallel
                 tasks = []
                 for frame in batch:
-                    task = asyncio.create_task(self.analyze_single_frame(frame))
+                    task = self.analyze_single_frame(frame)
                     tasks.append(task)
                 
                 # Wait for all tasks to complete
-                results = await asyncio.gather(*tasks)
+                results = tasks
                 
                 # Update frame data with analysis results
                 for i, result in enumerate(results):
@@ -220,11 +290,7 @@ class VideoAnalyzer:
                     total_persons_detected += len(persons)
                     
                     # Update frame with detected persons
-                    await mongodb.update_one_async(
-                        "frames", 
-                        {"id": frame_id}, 
-                        {"$set": {"persons": persons, "analyzed": True}}
-                    )
+                    mongodb.update_one("frames", {"id": frame_id}, {"$set": {"persons": persons, "analyzed": True}})
                 
                 total_processed += len(batch)
             
@@ -239,7 +305,7 @@ class VideoAnalyzer:
             logger.error(f"Error analyzing frames: {str(e)}")
             return {"error": str(e)}
     
-    async def analyze_single_frame(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze_single_frame(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """
         Analyze a single frame to detect persons using Llama 4's multimodal capabilities
         
@@ -415,10 +481,9 @@ class VideoAnalyzer:
                 }
                 
                 # Get analyzed frames for this video
-                frames = await mongodb.find_async("frames", {"videoId": video_id})
-                frames_list = await frames.to_list(length=None)
+                frames = mongodb.find_many("frames", {"videoId": video_id})
                 
-                if not frames_list:
+                if not frames:
                     logger.warning(f"No analyzed frames found for video {video_id}")
                     continue
                 
@@ -434,7 +499,7 @@ class VideoAnalyzer:
                     if "end" in timeframe and timeframe["end"]:
                         end_time = datetime.fromisoformat(timeframe["end"].replace('Z', '+00:00'))
                     
-                    for frame in frames_list:
+                    for frame in frames:
                         frame_time = datetime.fromisoformat(frame["timestamp"].replace('Z', '+00:00'))
                         
                         if start_time and frame_time < start_time:
@@ -445,15 +510,15 @@ class VideoAnalyzer:
                         
                         filtered_frames.append(frame)
                     
-                    frames_list = filtered_frames
+                    frames = filtered_frames
                 
                 # Skip if no frames after filtering
-                if not frames_list:
+                if not frames:
                     logger.warning(f"No frames match the timeframe filter for video {video_id}")
                     continue
                 
                 # Add to all frames collection
-                all_frames.extend(frames_list)
+                all_frames.extend(frames)
             
             # Sort all frames by timestamp for chronological analysis
             all_frames.sort(key=lambda x: x["timestamp"])
@@ -525,8 +590,7 @@ class VideoAnalyzer:
                     frame["persons"] = persons
                     
                     # Save the updated frame to database if available
-                    if self.mongodb_available:
-                        await mongodb.update_async("frames", {"id": frame["id"]}, {"$set": {"persons": persons}})
+                    mongodb.update_one("frames", {"id": frame["id"]}, {"$set": {"persons": persons}})
                     
                     logger.info(f"Detected {len(persons)} persons in frame {frame['id']} during suspect tracking")
                 except Exception as e:
@@ -927,7 +991,7 @@ class VideoAnalyzer:
             logger.error(f"Error analyzing behavior patterns: {str(e)}")
             return tracking_results
     
-    async def generate_timeline(self, tracking_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def generate_timeline(self, tracking_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Generate a detailed timeline and narrative of suspect movements across multiple videos
         using Llama 4's reasoning capabilities
@@ -1412,12 +1476,14 @@ class VideoAnalyzer:
         
         return graph_data
     
-    async def generate_summary(self, timeline_events: List[Dict[str, Any]]) -> str:
+    async def generate_summary(self, timeline_events: List[Dict[str, Any]], graph: Optional[Dict[str, Any]] = None, environment_context: Optional[Dict[str, Any]] = None) -> str:
         """
         Generate a natural language summary of the analysis using Llama 4's long context capabilities
         
         Args:
             timeline_events: List of timeline events
+            graph: Knowledge graph data (optional)
+            environment_context: Environmental context information (optional)
         
         Returns:
             Summary text
@@ -1426,18 +1492,45 @@ class VideoAnalyzer:
             return "No suspect appearances were detected in the provided videos."
         
         try:
-            # Use LLaMA to generate a comprehensive summary
-            # Prepare prompt for LLaMA
+            # Extract locations, timestamps, and other important information
+            locations = set()
+            for event in timeline_events:
+                if "location" in event:
+                    locations.add(event["location"])
+            
+            # Get first and last timestamps
+            first_event = timeline_events[0]
+            last_event = timeline_events[-1]
+            
+            first_time = datetime.fromisoformat(first_event["timestamp"].replace('Z', '+00:00'))
+            last_time = datetime.fromisoformat(last_event["timestamp"].replace('Z', '+00:00'))
+            
+            # Prepare prompt for LLaMA with environment context integration
             prompt = f"""
-            Generate a comprehensive summary of the following timeline of events tracking a suspect across multiple CCTV cameras.
-            Focus on key movements, patterns, and suspicious behaviors.
-            Include information about locations visited, items carried, and interactions with others.
+            Generate a detailed investigative narrative of a suspect's movements across multiple CCTV cameras.
+            This should be written in the style of a professional investigative report, with precise timestamps, locations, and descriptions of activities.
+            
+            Use the following timeline events to create a comprehensive narrative:
             
             TIMELINE EVENTS:
             {json.dumps(timeline_events, indent=2)}
             
-            Provide a detailed summary that could help investigators understand the suspect's movements and activities.
-            The summary should be well-structured and include all relevant details from the timeline.
+            GRAPH DATA:
+            {json.dumps(graph, indent=2) if graph else "No graph data available"}
+            
+            ENVIRONMENT CONTEXT:
+            {json.dumps(environment_context, indent=2) if environment_context else "No environment context available"}
+            
+            The narrative should include:
+            1. Precise timestamps for each movement and activity
+            2. Detailed descriptions of the suspect's appearance and any changes
+            3. Specific locations visited and the path taken between them, with reference to the environment context
+            4. Any interactions with other people or objects
+            5. Analysis of potentially suspicious behaviors or patterns in the context of the environment
+            6. Chronological flow that an investigator could follow easily
+            
+            The narrative should be at least 4-5 paragraphs long and include all significant events.
+            Incorporate details from the environment context to provide a comprehensive understanding of the suspect's movements relative to the physical space.
             """
             
             messages = [
@@ -1447,31 +1540,378 @@ class VideoAnalyzer:
                 }
             ]
             
-            # Use Llama 4's long context window to analyze the entire timeline at once
+            # Use Llama 4's long context window to generate the narrative
             response = llama_client.chat_completion(messages)
-            summary = response["choices"][0]["message"]["content"]
+            narrative = response["choices"][0]["message"]["content"]
             
-            return summary
+            return narrative
             
         except Exception as e:
-            logger.error(f"Error generating summary: {str(e)}")
+            logger.error(f"Error generating enhanced narrative: {str(e)}")
+            # Fall back to simple narrative
+            return await self._generate_simple_narrative(timeline_events, list(locations), first_time, last_time)
+    
+    async def generate_activity_summary(self, timeline_events: List[Dict[str, Any]], tracking_results: List[Dict[str, Any]]) -> str:
+        """
+        Generate a concise summary of the suspect's activities
+        
+        Args:
+            timeline_events: List of timeline events
+            tracking_results: List of tracking results
             
-            # Fallback to simple summary
+        Returns:
+            Activity summary text
+        """
+        if not timeline_events:
+            return "No activities detected."
+        
+        try:
+            # Extract key information
+            locations = set()
+            for event in timeline_events:
+                if "location" in event:
+                    locations.add(event["location"])
+            
+            # Get first and last timestamps
             first_event = timeline_events[0]
             last_event = timeline_events[-1]
             
             first_time = datetime.fromisoformat(first_event["timestamp"].replace('Z', '+00:00'))
             last_time = datetime.fromisoformat(last_event["timestamp"].replace('Z', '+00:00'))
             
-            duration = (last_time - first_time).total_seconds() / 60  # in minutes
+            duration_minutes = int((last_time - first_time).total_seconds() / 60)
             
-            locations = set()
-            for event in timeline_events:
-                locations.add(event["location"])
+            # Extract interactions
+            interactions = []
+            for result in tracking_results:
+                if "interactions" in result and result["interactions"]:
+                    interactions.extend(result["interactions"])
             
-            locations_str = ", ".join(locations) if locations else "multiple locations"
+            # Prepare prompt for LLaMA
+            prompt = f"""
+            Create a concise summary of a suspect's activities based on the following information:
             
-            return f"Suspect was tracked for approximately {duration:.0f} minutes across {len(locations)} different locations ({locations_str}). First appeared at {first_time.strftime('%I:%M %p')} and was last seen at {last_time.strftime('%I:%M %p')}."
+            - Duration: {duration_minutes} minutes
+            - Locations visited: {', '.join(locations)}
+            - First seen: {first_time.strftime('%I:%M %p')}
+            - Last seen: {last_time.strftime('%I:%M %p')}
+            - Interactions: {', '.join(interactions) if interactions else 'None detected'}
+            
+            The summary should be 2-3 sentences long and highlight the most important aspects of the suspect's movements and activities.
+            Focus on what would be most relevant to an investigator.
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+            
+            # Use LLaMA to generate the summary
+            response = llama_client.chat_completion(messages)
+            summary = response["choices"][0]["message"]["content"]
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error generating activity summary: {str(e)}")
+            return f"Suspect was tracked for {duration_minutes} minutes across {len(locations)} locations from {first_time.strftime('%I:%M %p')} to {last_time.strftime('%I:%M %p')}." 
+    
+    async def generate_visual_timeline(self, timeline_events: List[Dict[str, Any]], graph_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Generate visual timeline data for frontend visualization
+        
+        Args:
+            timeline_events: List of timeline events
+            graph_data: Knowledge graph data
+            
+        Returns:
+            List of visual timeline events
+        """
+        visual_events = []
+        
+        try:
+            # Map video IDs to location names from graph data
+            location_map = {}
+            for node in graph_data.get("nodes", []):
+                if node.get("type") == "location":
+                    location_map[node.get("id")] = node.get("label")
+            
+            # Process each timeline event
+            for i, event in enumerate(timeline_events):
+                # Get location name from graph data if possible
+                video_id = event.get("videoId")
+                location = location_map.get(video_id, event.get("location", "Unknown Location"))
+                
+                # Format timestamp
+                timestamp = event.get("timestamp", "")
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%I:%M:%S %p")
+                except (ValueError, TypeError):
+                    formatted_time = timestamp
+                
+                # Determine if this is a location change
+                is_location_change = False
+                if i > 0:
+                    prev_video_id = timeline_events[i-1].get("videoId")
+                    prev_location = location_map.get(prev_video_id, timeline_events[i-1].get("location", "Unknown"))
+                    is_location_change = location != prev_location
+                
+                # Create visual event
+                visual_event = {
+                    "id": event.get("id", f"event-{i}"),
+                    "time": formatted_time,
+                    "location": location,
+                    "activity": event.get("description", "Suspect detected"),
+                    "thumbnailUrl": event.get("thumbnailUrl", ""),
+                    "confidence": event.get("confidence", 0),
+                    "isLocationChange": is_location_change,
+                    "description": event.get("description", "")
+                }
+                
+                visual_events.append(visual_event)
+                
+        except Exception as e:
+            logger.error(f"Error generating visual timeline: {str(e)}")
+        
+        return visual_events
+
+    async def process_environment_video(self, video_path: str, video_id: str) -> Dict[str, Any]:
+        """
+        Process an environment video to extract detailed context information using Groq for fast inference
+        
+        Args:
+            video_path: Path to the environment video file
+            video_id: Unique ID of the video
+            
+        Returns:
+            Dict with environment context information
+        """
+        logger.info(f"Processing environment video: {video_path}")
+        
+        try:
+            # Open the video file
+            cap = cv2.VideoCapture(video_path)
+            
+            if not cap.isOpened():
+                logger.error(f"Error opening environment video file: {video_path}")
+                return {"error": "Failed to open environment video file"}
+            
+            # Get video properties
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps if fps > 0 else 0
+            
+            # Create frames directory if it doesn't exist
+            frames_dir = f"data/environment/frames/{video_id}"
+            os.makedirs(frames_dir, exist_ok=True)
+            
+            # Extract frames at regular intervals (1 frame every 5 seconds)
+            frame_interval = int(fps * 5)
+            frames_extracted = 0
+            frame_paths = []
+            
+            frame_num = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if frame_num % frame_interval == 0:
+                    # Save frame
+                    frame_path = f"{frames_dir}/frame_{frames_extracted:04d}.jpg"
+                    cv2.imwrite(frame_path, frame)
+                    frame_paths.append(frame_path)
+                    frames_extracted += 1
+                
+                frame_num += 1
+                
+                # Limit to 30 frames maximum to avoid token limits
+                if frames_extracted >= 30:
+                    break
+            
+            # Release video capture
+            cap.release()
+            
+            logger.info(f"Extracted {frames_extracted} frames from environment video")
+            
+            # Process frames in batches to extract environment context
+            environment_context = await self._analyze_environment_frames(frame_paths, video_id)
+            
+            # Store environment context in database
+            environment_context["id"] = f"env-{uuid.uuid4()}"
+            environment_context["videoId"] = video_id
+            environment_context["createdAt"] = datetime.now().isoformat()
+            
+            try:
+                await mongodb.insert_one_async("environment_contexts", environment_context)
+                logger.info(f"Stored environment context in database with ID: {environment_context['id']}")
+            except Exception as db_error:
+                logger.error(f"Database error: {str(db_error)}")
+            
+            return environment_context
+            
+        except Exception as e:
+            logger.error(f"Error processing environment video: {str(e)}")
+            return {"error": f"Failed to process environment video: {str(e)}"}
+    
+    async def _analyze_environment_frames(self, frame_paths: List[str], video_id: str) -> Dict[str, Any]:
+        """
+        Analyze environment frames to extract detailed context using Groq
+        
+        Args:
+            frame_paths: List of paths to extracted frames
+            video_id: ID of the video
+            
+        Returns:
+            Dict with environment context information
+        """
+        try:
+            # Encode frames as base64 for the API
+            encoded_frames = []
+            for i, frame_path in enumerate(frame_paths):
+                if i >= 10:  # Limit to 10 frames to avoid token limits
+                    break
+                    
+                with open(frame_path, "rb") as image_file:
+                    encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+                    encoded_frames.append(encoded_string)
+            
+            # Create a detailed prompt for Groq to extract environment context
+            prompt = f"""
+            Analyze these frames from a CCTV environment video and provide a detailed description of the physical environment.
+            Extract every minute detail that could be relevant for understanding the context of suspect movements and activities.
+            
+            Focus on the following aspects:
+            1. Detailed layout of the space (entrances, exits, hallways, rooms, etc.)
+            2. Furniture, fixtures, and equipment present
+            3. Potential blind spots or security vulnerabilities
+            4. Traffic patterns and flow of movement
+            5. Lighting conditions and visibility factors
+            6. Potential hiding places or areas of interest
+            7. Distinctive features that could serve as landmarks
+            8. Scale and dimensions of the space
+            9. Materials and surfaces (reflective, transparent, etc.)
+            10. Any text visible in the environment (signs, labels, etc.)
+            
+            Structure your response as a JSON object with the following fields:
+            - description: A comprehensive paragraph describing the overall environment
+            - locations: An array of distinct areas/locations with their names and descriptions
+            - securityFeatures: Any security-related elements visible
+            - dimensions: Estimated dimensions and scale
+            - materials: Predominant materials and surfaces
+            - lighting: Lighting conditions and visibility
+            - layout: Description of the spatial layout and organization
+            - furnishings: Notable furniture and fixtures
+            - accessPoints: Entrances, exits, and other access points
+            - blindSpots: Areas with limited visibility or coverage
+            
+            Be extremely detailed and precise. This information will be used to provide context for suspect tracking and analysis.
+            """
+            
+            # Use Groq for fast inference - note that Groq doesn't support multimodal inputs in the same format as OpenAI
+            # So we'll use a text-only prompt and describe the images
+            
+            # Create a text-only prompt
+            text_prompt = f"{prompt}\n\nNote: The environment video shows multiple frames of the same space from different angles."
+            
+            response = groq_client.chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": text_prompt
+                    }
+                ],
+                model="llama3-70b-8192"
+            )
+            
+            # Extract the response content
+            content = response["choices"][0]["message"]["content"]
+            
+            # Parse the JSON response
+            try:
+                # Try to extract JSON from the response
+                import re
+                json_match = re.search(r'```json\n(.+?)\n```', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                    context_data = json.loads(json_str)
+                else:
+                    # Try other JSON code block formats
+                    json_match = re.search(r'```(.+?)```', content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        # Remove any language identifier
+                        if json_str.startswith('json'):
+                            json_str = json_str[4:].strip()
+                        context_data = json.loads(json_str)
+                    else:
+                        # If no JSON block found, try to parse the entire response
+                        context_data = json.loads(content)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create a structured response from the text
+                logger.warning("Failed to parse JSON from Groq response, creating structured data from text")
+                context_data = {
+                    "description": content,
+                    "locations": []
+                }
+                
+                # Try to extract location information using LLaMA
+                location_prompt = f"""
+                Based on this environment description, extract a list of distinct locations or areas:
+                
+                {content}
+                
+                Format your response as a JSON array of objects, each with 'name' and 'description' fields.
+                """
+                
+                location_response = llama_client.chat_completion(
+                    messages=[
+                        {"role": "user", "content": location_prompt}
+                    ]
+                )
+                
+                location_content = location_response["choices"][0]["message"]["content"]
+                
+                try:
+                    # Try to extract JSON from the response
+                    json_match = re.search(r'```json\n(.+?)\n```', location_content, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        context_data["locations"] = json.loads(json_str)
+                    else:
+                        # If no JSON block found, try to parse the entire response
+                        context_data["locations"] = json.loads(location_content)
+                except:
+                    # If all parsing fails, create some default locations
+                    context_data["locations"] = [
+                        {"name": "Main Area", "description": "The primary area visible in the environment"}
+                    ]
+            
+            # Ensure we have the required fields
+            if "description" not in context_data:
+                context_data["description"] = "Environment with multiple areas and features"
+                
+            if "locations" not in context_data or not context_data["locations"]:
+                context_data["locations"] = [
+                    {"name": "Main Area", "description": "The primary area visible in the environment"}
+                ]
+            
+            return context_data
+            
+        except Exception as e:
+            logger.error(f"Error analyzing environment frames: {str(e)}")
+            # Return a basic context structure if analysis fails
+            return {
+                "description": "The environment appears to be an indoor space with multiple areas and features.",
+                "locations": [
+                    {"name": "Main Area", "description": "The primary area visible in the environment"},
+                    {"name": "Entrance", "description": "Entry point to the environment"},
+                    {"name": "Corridor", "description": "Connecting pathway between areas"}
+                ]
+            }
 
 # Create a singleton instance
 video_analyzer = VideoAnalyzer()

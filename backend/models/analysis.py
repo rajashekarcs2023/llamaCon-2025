@@ -1,5 +1,5 @@
-from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
+from pydantic import BaseModel
 from models.timeline import TimelineEvent
 from models.graph import GraphData
 

@@ -1,0 +1,607 @@
+{
+  "events": [
+    {
+      "id": "event-4c0fd070-292d-487c-921f-6789cd7436a3",
+      "timestamp": "2025-05-04T07:03:37.286213",
+      "location": "Main Entrance",
+      "confidence": 85,
+      "frameId": "frame_0000",
+      "videoId": "video_001",
+      "thumbnailUrl": "/frames/video_001/frame_0000.jpg",
+      "activity": "Entering with backpack",
+      "locationChange": false,
+      "timeSincePrevious": null,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Entering the main entrance",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-56925352-10d7-4dff-9b62-beed133e4d92",
+      "timestamp": "2025-05-04T07:04:37.286213",
+      "location": "Main Entrance",
+      "confidence": 87,
+      "frameId": "frame_0001",
+      "videoId": "video_001",
+      "thumbnailUrl": "/frames/video_001/frame_0001.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the main entrance",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-49069ecf-8130-4640-9745-544fd1299c45",
+      "timestamp": "2025-05-04T07:05:37.286213",
+      "location": "Main Entrance",
+      "confidence": 89,
+      "frameId": "frame_0002",
+      "videoId": "video_001",
+      "thumbnailUrl": "/frames/video_001/frame_0002.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the main entrance",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-c714f426-9a5e-42d0-a5db-9fc2690e8a38",
+      "timestamp": "2025-05-04T07:06:37.286213",
+      "location": "Main Entrance",
+      "confidence": 91,
+      "frameId": "frame_0003",
+      "videoId": "video_001",
+      "thumbnailUrl": "/frames/video_001/frame_0003.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the main entrance",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-f229d533-8512-44d2-b281-8848fb80ef81",
+      "timestamp": "2025-05-04T07:07:37.286213",
+      "location": "Main Entrance",
+      "confidence": 93,
+      "frameId": "frame_0004",
+      "videoId": "video_001",
+      "thumbnailUrl": "/frames/video_001/frame_0004.jpg",
+      "activity": "Exiting with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Exiting the main entrance",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-d78264ac-3442-46cc-9471-70549fe0576e",
+      "timestamp": "2025-05-04T07:08:37.286213",
+      "location": "Lobby",
+      "confidence": 85,
+      "frameId": "frame_0000",
+      "videoId": "video_002",
+      "thumbnailUrl": "/frames/video_002/frame_0000.jpg",
+      "activity": "Entering with phone, coffee cup",
+      "locationChange": true,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Entering the lobby",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-c469ed76-2b42-45c7-88ea-88bbf4183149",
+      "timestamp": "2025-05-04T07:09:37.286213",
+      "location": "Lobby",
+      "confidence": 87,
+      "frameId": "frame_0001",
+      "videoId": "video_002",
+      "thumbnailUrl": "/frames/video_002/frame_0001.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the lobby",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-ccbb9fc7-6b75-48b2-886d-8efe95a20050",
+      "timestamp": "2025-05-04T07:10:37.286213",
+      "location": "Lobby",
+      "confidence": 89,
+      "frameId": "frame_0002",
+      "videoId": "video_002",
+      "thumbnailUrl": "/frames/video_002/frame_0002.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the lobby",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-c36f9a2c-a158-4d93-8afc-f1d7f666a385",
+      "timestamp": "2025-05-04T07:11:37.286213",
+      "location": "Lobby",
+      "confidence": 91,
+      "frameId": "frame_0003",
+      "videoId": "video_002",
+      "thumbnailUrl": "/frames/video_002/frame_0003.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the lobby",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-85178221-d8a1-4775-9396-9fac156b53df",
+      "timestamp": "2025-05-04T07:12:37.286213",
+      "location": "Lobby",
+      "confidence": 93,
+      "frameId": "frame_0004",
+      "videoId": "video_002",
+      "thumbnailUrl": "/frames/video_002/frame_0004.jpg",
+      "activity": "Exiting with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Exiting the lobby",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-d18fbf07-7d87-4d68-8947-f60b949810ad",
+      "timestamp": "2025-05-04T07:13:37.286213",
+      "location": "Hallway",
+      "confidence": 85,
+      "frameId": "frame_0000",
+      "videoId": "video_003",
+      "thumbnailUrl": "/frames/video_003/frame_0000.jpg",
+      "activity": "Entering with backpack",
+      "locationChange": true,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Entering the hallway",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-818e69a1-939a-4a1c-9304-6268e11fe182",
+      "timestamp": "2025-05-04T07:14:37.286213",
+      "location": "Hallway",
+      "confidence": 87,
+      "frameId": "frame_0001",
+      "videoId": "video_003",
+      "thumbnailUrl": "/frames/video_003/frame_0001.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the hallway",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-411e515d-0fb6-48ef-9023-739f45eb9224",
+      "timestamp": "2025-05-04T07:15:37.286213",
+      "location": "Hallway",
+      "confidence": 89,
+      "frameId": "frame_0002",
+      "videoId": "video_003",
+      "thumbnailUrl": "/frames/video_003/frame_0002.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the hallway",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-d6cde1a6-31da-4d23-806c-3e3aa2fdd9d7",
+      "timestamp": "2025-05-04T07:16:37.286213",
+      "location": "Hallway",
+      "confidence": 91,
+      "frameId": "frame_0003",
+      "videoId": "video_003",
+      "thumbnailUrl": "/frames/video_003/frame_0003.jpg",
+      "activity": "Walking with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the hallway",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-50dfe15f-38de-4a91-a80a-2e39fd4bf284",
+      "timestamp": "2025-05-04T07:17:37.286213",
+      "location": "Hallway",
+      "confidence": 93,
+      "frameId": "frame_0004",
+      "videoId": "video_003",
+      "thumbnailUrl": "/frames/video_003/frame_0004.jpg",
+      "activity": "Exiting with backpack",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Exiting the hallway",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "backpack"
+      ]
+    },
+    {
+      "id": "event-a0fabfc0-f67f-4676-8a01-f1f947a73f34",
+      "timestamp": "2025-05-04T07:18:37.286213",
+      "location": "Emergency Exit",
+      "confidence": 85,
+      "frameId": "frame_0000",
+      "videoId": "video_004",
+      "thumbnailUrl": "/frames/video_004/frame_0000.jpg",
+      "activity": "Entering with phone, coffee cup",
+      "locationChange": true,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Entering the emergency exit",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-3c3c0cb2-5dfb-4078-b4af-5675e7f624b7",
+      "timestamp": "2025-05-04T07:19:37.286213",
+      "location": "Emergency Exit",
+      "confidence": 87,
+      "frameId": "frame_0001",
+      "videoId": "video_004",
+      "thumbnailUrl": "/frames/video_004/frame_0001.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the emergency exit",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-e113e94b-03fa-4c57-a062-f1045118a87d",
+      "timestamp": "2025-05-04T07:20:37.286213",
+      "location": "Emergency Exit",
+      "confidence": 89,
+      "frameId": "frame_0002",
+      "videoId": "video_004",
+      "thumbnailUrl": "/frames/video_004/frame_0002.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the emergency exit",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-b647adad-dd85-4f00-a9e3-7bfe162465cc",
+      "timestamp": "2025-05-04T07:21:37.286213",
+      "location": "Emergency Exit",
+      "confidence": 91,
+      "frameId": "frame_0003",
+      "videoId": "video_004",
+      "thumbnailUrl": "/frames/video_004/frame_0003.jpg",
+      "activity": "Walking with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Walking through the emergency exit",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    },
+    {
+      "id": "event-b6d8c281-4e93-46cb-9c66-da55a4059856",
+      "timestamp": "2025-05-04T07:22:37.286213",
+      "location": "Emergency Exit",
+      "confidence": 93,
+      "frameId": "frame_0004",
+      "videoId": "video_004",
+      "thumbnailUrl": "/frames/video_004/frame_0004.jpg",
+      "activity": "Exiting with phone, coffee cup",
+      "locationChange": false,
+      "timeSincePrevious": 60.0,
+      "interactions": [],
+      "description": "Male, approximately 30-40 years old, wearing dark jacket and jeans",
+      "position": "Exiting the emergency exit",
+      "reasoning": "The suspect matches the description and appears to be the same person based on clothing and physical characteristics",
+      "carrying": [
+        "phone",
+        "coffee cup"
+      ]
+    }
+  ],
+  "duration": 19.0,
+  "locations": [
+    "Emergency Exit",
+    "Main Entrance",
+    "Lobby",
+    "Hallway"
+  ],
+  "firstSeen": "2025-05-04T07:03:37.286213",
+  "lastSeen": "2025-05-04T07:22:37.286213",
+  "narrative": "**Investigative Narrative**\n\nOn May 4, 2025, between 07:03:37 and 07:22:37, a suspect was tracked via CCTV footage across various locations within a building. The following narrative details the suspect's movements, activities, and behaviors during this timeframe.\n\n**Initial Observation at Main Entrance (07:03:37 - 07:05:37)**\nAt 07:03:37, the suspect, a male approximately 30-40 years old, wearing a dark jacket and jeans, was observed entering the Main Entrance of the building, carrying a backpack. Over the next two minutes, the suspect was seen walking through the Main Entrance on three consecutive occasions (07:04:37, 07:05:37), still carrying the backpack, with no notable interactions or changes in behavior observed.\n\n**Exit from Main Entrance and Entry into Lobby (07:07:37 - 07:08:37)**\nAt 07:07:37, the suspect exited the Main Entrance, still carrying the backpack. One minute later, at 07:08:37, he was observed entering the Lobby, now carrying a phone and a coffee cup, in addition to presumably still having the backpack, though the backpack is not mentioned in these events.\n\n**Movement within Lobby (07:09:37 - 07:12:37)**\nBetween 07:09:37 and 07:12:37, the suspect was seen walking through the Lobby on four consecutive occasions, consistently carrying a phone and a coffee cup. No significant interactions with others or changes in behavior were noted during this period.\n\n**Entry into Hallway and Subsequent Exit (07:13:37 - 07:17:37)**\nAt 07:13:37, the suspect entered the Hallway, carrying a backpack. For the next four minutes, he was observed walking through the Hallway on four occasions (07:14:37 - 07:16:37), still carrying the backpack. At 07:17:37, the suspect exited the Hallway, continuing to carry the backpack.\n\n**Final Observations at Emergency Exit (07:18:37 - 07:22:37)**\nThe suspect then proceeded to the Emergency Exit, where he was seen entering at 07:18:37, carrying a phone and a coffee cup. Over the next four minutes, he was observed walking through the Emergency Exit on four consecutive occasions (07:19:37 - 07:21:37), still carrying the phone and coffee cup. At 07:22:37, the suspect exited the Emergency Exit, maintaining possession of the phone and coffee cup.\n\n**Notable Observations and Patterns**\n- The suspect consistently wore a dark jacket and jeans throughout the observed period.\n- He carried a backpack during his movements from the Main Entrance through the Hallway but was observed with a phone and coffee cup during his time in the Lobby and at the Emergency Exit. The backpack was not mentioned in connection with these latter locations.\n- The suspect did not interact with anyone during the observed period.\n- His movements suggest a deliberate and cautious approach, as he was seen exiting and re-entering various areas, potentially indicating a search for something or someone, or possibly attempting to avoid detection.\n\n**Conclusion**\nThe suspect's actions, as observed via CCTV footage, indicate a pattern of movement that includes entering and exiting various parts of the building, transitioning between carrying a backpack and carrying a phone and coffee cup. The investigation should consider the possibility that the suspect was engaging in premeditated actions, potentially related to a specific target or goal within the building. Further analysis of additional CCTV footage, as well as any available internal footage, may provide further insights into the suspect's intentions and potential accomplices.",
+  "activitySummary": "Activity summary: 2 instances of Entering with backpack; 6 instances of Walking with backpack; 2 instances of Exiting with backpack; 2 instances of Entering with phone, coffee cup; 6 instances of Walking with phone, coffee cup; 2 instances of Exiting with phone, coffee cup",
+  "visualTimeline": [
+    {
+      "id": "event-4c0fd070-292d-487c-921f-6789cd7436a3",
+      "time": "07:03:37",
+      "location": "Main Entrance",
+      "activity": "Entering with backpack",
+      "thumbnailUrl": "/frames/video_001/frame_0000.jpg",
+      "confidence": 85,
+      "isLocationChange": false,
+      "description": "Entering with backpack at Main Entrance"
+    },
+    {
+      "id": "event-56925352-10d7-4dff-9b62-beed133e4d92",
+      "time": "07:04:37",
+      "location": "Main Entrance",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_001/frame_0001.jpg",
+      "confidence": 87,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Main Entrance"
+    },
+    {
+      "id": "event-49069ecf-8130-4640-9745-544fd1299c45",
+      "time": "07:05:37",
+      "location": "Main Entrance",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_001/frame_0002.jpg",
+      "confidence": 89,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Main Entrance"
+    },
+    {
+      "id": "event-c714f426-9a5e-42d0-a5db-9fc2690e8a38",
+      "time": "07:06:37",
+      "location": "Main Entrance",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_001/frame_0003.jpg",
+      "confidence": 91,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Main Entrance"
+    },
+    {
+      "id": "event-f229d533-8512-44d2-b281-8848fb80ef81",
+      "time": "07:07:37",
+      "location": "Main Entrance",
+      "activity": "Exiting with backpack",
+      "thumbnailUrl": "/frames/video_001/frame_0004.jpg",
+      "confidence": 93,
+      "isLocationChange": false,
+      "description": "Exiting with backpack at Main Entrance"
+    },
+    {
+      "id": "event-d78264ac-3442-46cc-9471-70549fe0576e",
+      "time": "07:08:37",
+      "location": "Lobby",
+      "activity": "Entering with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_002/frame_0000.jpg",
+      "confidence": 85,
+      "isLocationChange": true,
+      "description": "Entering with phone, coffee cup at Lobby"
+    },
+    {
+      "id": "event-c469ed76-2b42-45c7-88ea-88bbf4183149",
+      "time": "07:09:37",
+      "location": "Lobby",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_002/frame_0001.jpg",
+      "confidence": 87,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Lobby"
+    },
+    {
+      "id": "event-ccbb9fc7-6b75-48b2-886d-8efe95a20050",
+      "time": "07:10:37",
+      "location": "Lobby",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_002/frame_0002.jpg",
+      "confidence": 89,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Lobby"
+    },
+    {
+      "id": "event-c36f9a2c-a158-4d93-8afc-f1d7f666a385",
+      "time": "07:11:37",
+      "location": "Lobby",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_002/frame_0003.jpg",
+      "confidence": 91,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Lobby"
+    },
+    {
+      "id": "event-85178221-d8a1-4775-9396-9fac156b53df",
+      "time": "07:12:37",
+      "location": "Lobby",
+      "activity": "Exiting with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_002/frame_0004.jpg",
+      "confidence": 93,
+      "isLocationChange": false,
+      "description": "Exiting with phone, coffee cup at Lobby"
+    },
+    {
+      "id": "event-d18fbf07-7d87-4d68-8947-f60b949810ad",
+      "time": "07:13:37",
+      "location": "Hallway",
+      "activity": "Entering with backpack",
+      "thumbnailUrl": "/frames/video_003/frame_0000.jpg",
+      "confidence": 85,
+      "isLocationChange": true,
+      "description": "Entering with backpack at Hallway"
+    },
+    {
+      "id": "event-818e69a1-939a-4a1c-9304-6268e11fe182",
+      "time": "07:14:37",
+      "location": "Hallway",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_003/frame_0001.jpg",
+      "confidence": 87,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Hallway"
+    },
+    {
+      "id": "event-411e515d-0fb6-48ef-9023-739f45eb9224",
+      "time": "07:15:37",
+      "location": "Hallway",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_003/frame_0002.jpg",
+      "confidence": 89,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Hallway"
+    },
+    {
+      "id": "event-d6cde1a6-31da-4d23-806c-3e3aa2fdd9d7",
+      "time": "07:16:37",
+      "location": "Hallway",
+      "activity": "Walking with backpack",
+      "thumbnailUrl": "/frames/video_003/frame_0003.jpg",
+      "confidence": 91,
+      "isLocationChange": false,
+      "description": "Walking with backpack at Hallway"
+    },
+    {
+      "id": "event-50dfe15f-38de-4a91-a80a-2e39fd4bf284",
+      "time": "07:17:37",
+      "location": "Hallway",
+      "activity": "Exiting with backpack",
+      "thumbnailUrl": "/frames/video_003/frame_0004.jpg",
+      "confidence": 93,
+      "isLocationChange": false,
+      "description": "Exiting with backpack at Hallway"
+    },
+    {
+      "id": "event-a0fabfc0-f67f-4676-8a01-f1f947a73f34",
+      "time": "07:18:37",
+      "location": "Emergency Exit",
+      "activity": "Entering with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_004/frame_0000.jpg",
+      "confidence": 85,
+      "isLocationChange": true,
+      "description": "Entering with phone, coffee cup at Emergency Exit"
+    },
+    {
+      "id": "event-3c3c0cb2-5dfb-4078-b4af-5675e7f624b7",
+      "time": "07:19:37",
+      "location": "Emergency Exit",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_004/frame_0001.jpg",
+      "confidence": 87,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Emergency Exit"
+    },
+    {
+      "id": "event-e113e94b-03fa-4c57-a062-f1045118a87d",
+      "time": "07:20:37",
+      "location": "Emergency Exit",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_004/frame_0002.jpg",
+      "confidence": 89,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Emergency Exit"
+    },
+    {
+      "id": "event-b647adad-dd85-4f00-a9e3-7bfe162465cc",
+      "time": "07:21:37",
+      "location": "Emergency Exit",
+      "activity": "Walking with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_004/frame_0003.jpg",
+      "confidence": 91,
+      "isLocationChange": false,
+      "description": "Walking with phone, coffee cup at Emergency Exit"
+    },
+    {
+      "id": "event-b6d8c281-4e93-46cb-9c66-da55a4059856",
+      "time": "07:22:37",
+      "location": "Emergency Exit",
+      "activity": "Exiting with phone, coffee cup",
+      "thumbnailUrl": "/frames/video_004/frame_0004.jpg",
+      "confidence": 93,
+      "isLocationChange": false,
+      "description": "Exiting with phone, coffee cup at Emergency Exit"
+    }
+  ]
+}

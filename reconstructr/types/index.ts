@@ -99,3 +99,25 @@ export interface AnalysisResult {
   summary: string
   narrationUrl?: string
 }
+
+// Enhanced narrative types for detailed suspect tracking
+export interface VisualTimelineEvent {
+  id: string
+  time: string
+  location: string
+  activity: string
+  thumbnailUrl: string
+  confidence: number
+  isLocationChange: boolean
+  description: string
+}
+
+export interface EnhancedAnalysisResult extends AnalysisResult {
+  enhancedNarrative?: string
+  activitySummary?: string
+  locations?: string[]
+  duration?: number
+  firstSeen?: string
+  lastSeen?: string
+  visualTimeline?: VisualTimelineEvent[]
+}

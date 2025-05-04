@@ -8,7 +8,7 @@ import shutil
 from datetime import datetime
 import json
 
-# Import models and utils (to be implemented)
+# Import models
 from models.video import VideoFeed
 from models.suspect import Suspect
 from models.timeline import TimelineEvent
@@ -16,12 +16,10 @@ from models.graph import GraphData, GraphNode, GraphEdge
 from models.analysis import AnalysisRequest, AnalysisResult
 from models.query import Query
 
-# Import utilities (to be implemented)
-from utils.video_processor import process_video
-from utils.suspect_tracker import track_suspect
-from utils.timeline_generator import generate_timeline
-from utils.graph_builder import build_knowledge_graph
-from utils.llama_integration import generate_narration, answer_query
+# Import utilities
+from utils.video_analyzer_enhanced import video_analyzer
+from utils.llama_client import llama_client
+from utils.groq_client import groq_client
 
 # Create FastAPI app
 app = FastAPI(
@@ -44,11 +42,17 @@ os.makedirs("data/videos", exist_ok=True)
 os.makedirs("data/suspects", exist_ok=True)
 os.makedirs("data/results", exist_ok=True)
 
-# In-memory storage for development (replace with MongoDB in production)
-videos_db = {}
-suspects_db = {}
-analyses_db = {}
-queries_db = {}
+# Import database connectors
+from utils.db_connector import mongodb
+
+# Initialize MongoDB connection
+@app.on_event("startup")
+async def startup_db_client():
+    await mongodb.connect_async()
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    mongodb.disconnect()
 
 # Health check endpoint
 @app.get("/")
@@ -85,7 +89,11 @@ async def upload_video(
     
     # Process video in background (extract frames, etc.)
     if background_tasks:
-        background_tasks.add_task(process_video, file_path, video_id)
+        background_tasks.add_task(video_analyzer.process_video, file_path, video_id, {
+            "name": name,
+            "location": location,
+            "timestamp": timestamp
+        })
     
     # Create video metadata
     video_data = {
@@ -101,21 +109,23 @@ async def upload_video(
     }
     
     # Store in database
-    videos_db[video_id] = video_data
+    await mongodb.insert_one_async("videos", video_data)
     
     return video_data
 
 @app.get("/videos", response_model=List[VideoFeed])
 async def get_videos():
     """Get all uploaded videos"""
-    return list(videos_db.values())
+    videos = await mongodb.find_many_async("videos", {})
+    return videos
 
 @app.get("/videos/{video_id}", response_model=VideoFeed)
 async def get_video(video_id: str):
     """Get a specific video by ID"""
-    if video_id not in videos_db:
+    video = await mongodb.find_one_async("videos", {"id": video_id})
+    if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    return videos_db[video_id]
+    return video
 
 # Suspect Endpoints
 @app.post("/upload_suspect", response_model=Suspect)
@@ -145,21 +155,23 @@ async def upload_suspect(
     }
     
     # Store in database
-    suspects_db[suspect_id] = suspect_data
+    await mongodb.insert_one_async("suspects", suspect_data)
     
     return suspect_data
 
 @app.get("/suspects", response_model=List[Suspect])
 async def get_suspects():
     """Get all uploaded suspects"""
-    return list(suspects_db.values())
+    suspects = await mongodb.find_many_async("suspects", {})
+    return suspects
 
 @app.get("/suspects/{suspect_id}", response_model=Suspect)
 async def get_suspect(suspect_id: str):
     """Get a specific suspect by ID"""
-    if suspect_id not in suspects_db:
+    suspect = await mongodb.find_one_async("suspects", {"id": suspect_id})
+    if not suspect:
         raise HTTPException(status_code=404, detail="Suspect not found")
-    return suspects_db[suspect_id]
+    return suspect
 
 # Analysis Endpoints
 @app.post("/analyze", response_model=AnalysisResult)
@@ -169,11 +181,13 @@ async def analyze_suspect(
 ):
     """Run suspect tracking analysis across selected videos"""
     # Validate request
-    if request.suspectId not in suspects_db:
+    suspect = await mongodb.find_one_async("suspects", {"id": request.suspectId})
+    if not suspect:
         raise HTTPException(status_code=404, detail="Suspect not found")
     
     for video_id in request.videoIds:
-        if video_id not in videos_db:
+        video = await mongodb.find_one_async("videos", {"id": video_id})
+        if not video:
             raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
     
     # Generate a unique ID for the analysis
@@ -190,7 +204,7 @@ async def analyze_suspect(
     }
     
     # Store in database
-    analyses_db[analysis_id] = analysis_result
+    await mongodb.insert_one_async("analyses", analysis_result)
     
     # Run analysis in background
     background_tasks.add_task(
@@ -207,40 +221,42 @@ async def analyze_suspect(
 @app.get("/analysis/{analysis_id}", response_model=AnalysisResult)
 async def get_analysis(analysis_id: str):
     """Get analysis results by ID"""
-    if analysis_id not in analyses_db:
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
-    return analyses_db[analysis_id]
+    return analysis
 
 # Timeline Endpoints
 @app.get("/timeline/{analysis_id}", response_model=List[TimelineEvent])
 async def get_timeline(analysis_id: str):
     """Get timeline for a specific analysis"""
-    if analysis_id not in analyses_db:
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
-    return analyses_db[analysis_id]["timeline"]
+    return analysis["timeline"]
 
 # Graph Endpoints
 @app.get("/graph/{analysis_id}", response_model=GraphData)
 async def get_graph(analysis_id: str):
     """Get knowledge graph for a specific analysis"""
-    if analysis_id not in analyses_db:
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
-    return analyses_db[analysis_id]["graph"]
+    return analysis["graph"]
 
 # Narration Endpoints
 @app.get("/narrate/{analysis_id}")
 async def get_narration(analysis_id: str, language: str = "en"):
     """Get narration for a specific analysis in the specified language"""
-    if analysis_id not in analyses_db:
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
     
-    analysis = analyses_db[analysis_id]
-    
-    if not analysis["narrationUrl"]:
+    if not analysis.get("narrationUrl"):
         # Generate narration if not already available
         narration = await generate_narration(analysis, language)
         analysis["narrationUrl"] = narration["url"]
-        analyses_db[analysis_id] = analysis
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {"narrationUrl": narration["url"]})
     
     return {"narrationUrl": analysis["narrationUrl"]}
 
@@ -258,11 +274,89 @@ async def submit_query(query: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="Query text is required")
     
     # Check if analysis exists if ID is provided
-    if analysis_id and analysis_id not in analyses_db:
-        raise HTTPException(status_code=404, detail="Analysis not found")
+    if analysis_id:
+        analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+        if not analysis:
+            raise HTTPException(status_code=404, detail="Analysis not found")
     
-    # Process query
-    response = await answer_query(query_text, analysis_id)
+    # Process query using LLaMA
+    if analysis_id:
+        # Get analysis data
+        analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+        timeline = analysis.get("timeline", [])
+        graph = analysis.get("graph", {"nodes": [], "edges": []})
+        
+        # Prepare context for LLaMA
+        context = {
+            "timeline": timeline,
+            "graph": graph,
+            "summary": analysis.get("summary", "")
+        }
+        
+        # Create prompt with context
+        prompt = f"""You are an AI assistant helping with a CCTV investigation.
+        Below is the data from our analysis of a suspect tracked across multiple cameras.
+        
+        TIMELINE:
+        {json.dumps(timeline, indent=2)}
+        
+        GRAPH DATA:
+        {json.dumps(graph, indent=2)}
+        
+        SUMMARY:
+        {analysis.get('summary', '')}
+        
+        Based on this information, please answer the following question:
+        {query_text}
+        
+        Provide a detailed answer using only the information available in the data.
+        If the answer cannot be determined from the data, please say so.
+        """
+    else:
+        # General query without specific analysis
+        prompt = f"""You are an AI assistant helping with a CCTV investigation.
+        Please answer the following question about video surveillance and suspect tracking:
+        
+        {query_text}
+        
+        Provide a helpful and informative answer.
+        """
+    
+    # Call LLaMA API
+    messages = [
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+    
+    llama_response = llama_client.chat_completion(messages)
+    response_text = llama_response["choices"][0]["message"]["content"]
+    
+    # Create visual data if applicable
+    visual_data = None
+    if analysis_id and any(keyword in query_text.lower() for keyword in ["where", "location", "when", "time"]):
+        # For location/time queries, provide a visual from the timeline
+        if timeline:
+            # Find most relevant event
+            relevant_event = timeline[0]  # Default to first event
+            
+            # Simple keyword matching to find most relevant event
+            for event in timeline:
+                if any(keyword in query_text.lower() for keyword in event.get("description", "").lower().split()):
+                    relevant_event = event
+                    break
+            
+            visual_data = {
+                "type": "image",
+                "url": relevant_event.get("thumbnailUrl", "")
+            }
+    
+    # Create query response
+    response = {
+        "text": response_text,
+        "visualData": visual_data
+    }
     
     # Create query record
     query_data = {
@@ -273,7 +367,7 @@ async def submit_query(query: Dict[str, Any]):
     }
     
     # Store in database
-    queries_db[query_id] = query_data
+    await mongodb.insert_one_async("queries", query_data)
     
     return query_data
 
@@ -281,10 +375,11 @@ async def submit_query(query: Dict[str, Any]):
 @app.get("/summary/{analysis_id}")
 async def get_summary(analysis_id: str):
     """Get a detailed summary of the analysis"""
-    if analysis_id not in analyses_db:
+    analysis = await mongodb.find_one_async("analyses", {"id": analysis_id})
+    if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
     
-    return {"summary": analyses_db[analysis_id]["summary"]}
+    return {"summary": analysis["summary"]}
 
 # Background task for running the full analysis
 async def run_analysis(
@@ -297,33 +392,80 @@ async def run_analysis(
     """Run the full analysis pipeline in the background"""
     try:
         # Get suspect and video data
-        suspect = suspects_db[suspect_id]
-        videos = [videos_db[video_id] for video_id in video_ids]
+        suspect = await mongodb.find_one_async("suspects", {"id": suspect_id})
+        videos = []
+        for video_id in video_ids:
+            video = await mongodb.find_one_async("videos", {"id": video_id})
+            if video:
+                videos.append(video)
+        
+        # Make sure videos are processed
+        for video in videos:
+            if not video.get("processed", False):
+                logger.info(f"Processing video: {video['id']}")
+                await video_analyzer.process_video(
+                    f"data/videos/{video['id']}.mp4",
+                    video['id'],
+                    {
+                        "name": video.get("name", ""),
+                        "location": video.get("location", ""),
+                        "timestamp": video.get("timestamp", "")
+                    }
+                )
+                
+                # Analyze frames to detect persons
+                await video_analyzer.analyze_frames(video['id'])
         
         # Track suspect across videos
-        tracking_results = await track_suspect(suspect, videos, timeframe)
+        tracking_results = await video_analyzer.track_suspect(suspect, videos, timeframe)
+        
+        # Store tracking results
+        for result in tracking_results:
+            await mongodb.insert_one_async("tracking_results", result)
         
         # Generate timeline
-        timeline = await generate_timeline(tracking_results)
+        timeline = await video_analyzer.generate_timeline(tracking_results)
         
         # Build knowledge graph
-        graph = await build_knowledge_graph(tracking_results)
+        graph = await video_analyzer.build_knowledge_graph(tracking_results)
         
         # Generate summary using LLaMA
-        summary = "Suspect was tracked across multiple camera feeds. Analysis complete."
+        summary = await video_analyzer.generate_summary(timeline)
         
         # Generate narration if requested
         narration_url = None
         if options and options.get("includeNarration"):
             language = options.get("language", "en")
-            narration = await generate_narration(
-                {"timeline": timeline, "graph": graph},
-                language
-            )
-            narration_url = narration["url"]
+            
+            # Generate narration text using LLaMA
+            narration_prompt = f"""Generate a detailed narration of the following timeline of events in {language} language.
+            Make it sound like a detective explaining the movements of a suspect across multiple CCTV cameras.
+            
+            {json.dumps(timeline, indent=2)}
+            """
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": narration_prompt
+                }
+            ]
+            
+            response = llama_client.chat_completion(messages)
+            narration_text = response["choices"][0]["message"]["content"]
+            
+            # In a real implementation, we would convert this text to speech
+            # For now, we'll just store the text in a file
+            narration_file = f"data/results/{analysis_id}_narration.txt"
+            os.makedirs(os.path.dirname(narration_file), exist_ok=True)
+            
+            with open(narration_file, "w") as f:
+                f.write(narration_text)
+            
+            narration_url = f"/results/{analysis_id}_narration.txt"
         
         # Update analysis result
-        analyses_db[analysis_id].update({
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
             "timeline": timeline,
             "graph": graph,
             "summary": summary,
@@ -332,6 +474,6 @@ async def run_analysis(
         
     except Exception as e:
         # Update analysis with error
-        analyses_db[analysis_id].update({
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
             "summary": f"Error during analysis: {str(e)}"
         })

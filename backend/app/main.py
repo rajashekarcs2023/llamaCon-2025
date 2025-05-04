@@ -623,6 +623,71 @@ async def run_analysis(
             videos.append(video)
             logger.info(f"Found video: {video['id']}")
         
+        # First, get or process environment context
+        environment_context = None
+        try:
+            # Try to get the latest environment context from the database
+            env_contexts = await mongodb.find_many_async("environment_contexts", {"status": "complete"}, sort=[("createdAt", -1)], limit=1)
+            if env_contexts and len(env_contexts) > 0:
+                environment_context = env_contexts[0]
+                logger.info(f"Using existing environment context: {environment_context['id']}")
+            else:
+                # If no environment context exists, check if there's an environment video
+                env_videos = await mongodb.find_many_async("videos", {"isEnvironment": True}, limit=1)
+                if env_videos and len(env_videos) > 0:
+                    env_video = env_videos[0]
+                    logger.info(f"Processing environment video: {env_video['id']}")
+                    
+                    # Process the environment video
+                    env_video_path = env_video.get("path", f"data/videos/{env_video['id']}.mp4")
+                    if not os.path.exists(env_video_path):
+                        env_video_path = "data/environment/environment awareness.MOV"
+                    
+                    if os.path.exists(env_video_path):
+                        # Process the environment video
+                        environment_context = await video_analyzer.process_environment_video(env_video_path, env_video['id'])
+                        logger.info(f"Generated environment context from video: {env_video['id']}")
+                    else:
+                        logger.warning(f"Environment video not found: {env_video_path}")
+                else:
+                    logger.warning("No environment videos found")
+        except Exception as env_error:
+            logger.error(f"Error processing environment context: {str(env_error)}")
+            # Continue without environment context
+        
+        # If still no environment context, create a default one
+        if not environment_context:
+            logger.info("Using default environment context")
+            environment_context = {
+                "id": f"env-default-{uuid.uuid4()}",
+                "description": "The environment is a modern office building with multiple areas including entrances, hallways, dining areas, and office spaces.",
+                "locations": [
+                    {"name": "Main Entrance", "description": "The main entrance to the building"},
+                    {"name": "Hallway", "description": "Connecting corridor"},
+                    {"name": "Dining Area", "description": "Area with tables for eating"},
+                    {"name": "Office Space", "description": "Work area with desks"}
+                ],
+                "securityFeatures": [
+                    {"type": "CCTV Camera", "location": "Main entrance"}
+                ],
+                "dimensions": "Approximately 50x40 meters",
+                "materials": "Modern construction with glass, metal, and concrete",
+                "lighting": "Well-lit with overhead lighting",
+                "layout": "Open floor plan with some partitioned areas",
+                "accessPoints": [
+                    {"type": "Main Entrance", "location": "Front of building"}
+                ],
+                "blindSpots": [
+                    {"location": "Behind columns", "description": "Areas behind structural columns"}
+                ]
+            }
+        
+        # Update analysis with environment context
+        await mongodb.update_one_async("analyses", {"id": analysis_id}, {
+            "environmentContextId": environment_context.get("id"),
+            "status": "environment_processed"
+        })
+        
         # Make sure videos are processed
         for video in videos:
             try:
@@ -635,8 +700,8 @@ async def run_analysis(
                     await mongodb.update_one_async("analyses", {"id": analysis_id}, {"summary": f"Error: Video file not found: {video['id']}"})
                     return
                 
-                # Process video
-                await video_analyzer.process_video(
+                # Process video - note that process_video is synchronous
+                video_result = video_analyzer.process_video(
                     video_path,
                     video['id'],
                     {
@@ -646,9 +711,9 @@ async def run_analysis(
                     }
                 )
                 
-                # Analyze frames to detect persons
-                await video_analyzer.analyze_frames(video['id'])
-                logger.info(f"Successfully processed video: {video['id']}")
+                # Analyze frames to detect persons - note that analyze_frames is synchronous
+                analysis_result = video_analyzer.analyze_frames(video['id'])
+                logger.info(f"Successfully processed video: {video['id']} with {analysis_result.get('frames_analyzed', 0)} frames analyzed")
             except Exception as e:
                 logger.error(f"Error processing video {video['id']}: {str(e)}")
                 await mongodb.update_one_async("analyses", {"id": analysis_id}, {"summary": f"Error processing video {video['id']}: {str(e)}"})
@@ -674,29 +739,8 @@ async def run_analysis(
             graph = await video_analyzer.build_knowledge_graph(tracking_results)
             logger.info(f"Built knowledge graph with {len(graph.get('nodes', []))} nodes and {len(graph.get('edges', []))} edges")
             
-            # Always get environment context for LLM
-            environment_context = None
-            try:
-                # Try to get the latest environment context from the database
-                env_contexts = await mongodb.find_many_async("environment_contexts", {}, sort=[("createdAt", -1)], limit=1)
-                if env_contexts and len(env_contexts) > 0:
-                    environment_context = env_contexts[0]
-                    logger.info(f"Using environment context: {environment_context['id']}")
-                else:
-                    # If no environment context exists, create a default one
-                    logger.info("No environment context found, using default")
-                    environment_context = {
-                        "description": "The environment is a modern office building with multiple areas including entrances, hallways, dining areas, and office spaces.",
-                        "locations": [
-                            {"name": "Main Entrance", "description": "The main entrance to the building"},
-                            {"name": "Hallway", "description": "Connecting corridor"},
-                            {"name": "Dining Area", "description": "Area with tables for eating"},
-                            {"name": "Office Space", "description": "Work area with desks"}
-                        ]
-                    }
-            except Exception as env_error:
-                logger.error(f"Error getting environment context: {str(env_error)}")
-                # Continue without environment context
+            # Environment context was already processed at the beginning of the function
+            # No need to fetch it again
             
             # Generate summary with environment context
             logger.info("Generating summary with environment context")

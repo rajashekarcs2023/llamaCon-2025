@@ -210,6 +210,7 @@ export async function uploadSuspect(
 export interface AnalysisRequest {
   suspectId?: string
   videoIds: string[]
+  environmentVideoId?: string
   options?: {
     includeNarration?: boolean
     language?: string
@@ -238,6 +239,23 @@ export interface AnalysisResult {
   visualTimeline?: VisualTimelineEvent[]
 }
 
+// Mock environment context for testing
+const mockEnvironmentContext = {
+  id: `env-${Date.now()}`,
+  videoId: "mock-env-video",
+  description: "The environment is a modern office building with multiple areas including a lobby, hallways, dining area, and office spaces. The building has a main entrance with glass doors leading to a spacious lobby with a reception desk. From the lobby, hallways lead to different areas including a dining area with tables and chairs, a kitchen for food preparation, meeting rooms, and open office spaces.",
+  locations: [
+    {name: "Main Entrance", description: "The main entrance to the building with glass doors"},
+    {name: "Lobby", description: "Large open area with reception desk"},
+    {name: "Hallway", description: "Long corridor connecting different areas"},
+    {name: "Dining Area", description: "Open space with tables and chairs for eating"},
+    {name: "Kitchen", description: "Food preparation area with appliances"},
+    {name: "Meeting Room", description: "Enclosed space with conference table"},
+    {name: "Office Area", description: "Open plan workspace with desks and computers"}
+  ],
+  status: "complete"
+}
+
 export async function runSuspectTracking(request: AnalysisRequest): Promise<AnalysisResult> {
   console.log("Running suspect tracking:", request)
 
@@ -248,6 +266,16 @@ export async function runSuspectTracking(request: AnalysisRequest): Promise<Anal
 
   if (!request.videoIds || request.videoIds.length === 0) {
     throw new Error("At least one video ID is required")
+  }
+  
+  // Process environment video if specified and includeEnvironment is true
+  if (request.environmentVideoId && request.options?.includeEnvironment) {
+    try {
+      await processEnvironmentVideo({videoId: request.environmentVideoId})
+      console.log("Environment video processed successfully")
+    } catch (error) {
+      console.warn("Failed to process environment video, continuing without it:", error)
+    }
   }
   
   // Always include environment context
